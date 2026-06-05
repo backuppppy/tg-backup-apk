@@ -19,9 +19,6 @@ orientation = portrait
 android.api = 33
 android.minapi = 21
 android.ndk = 25b
-
-# Pin p4a to release that uses Python 3.11 (avoids 3.14 compile issues)
-p4a.branch = release-2024.01.21
 android.sdk = 33
 android.accept_sdk_license = True
 

@@ -30,7 +30,8 @@ jobs:
             git zip unzip \
             autoconf libtool pkg-config zlib1g-dev \
             libncurses5-dev libncursesw5-dev libtinfo5 \
-            cmake libffi-dev libssl-dev
+            cmake libffi-dev libssl-dev \
+            liblzma-dev uuid-dev
 
       - name: Cache buildozer
         uses: actions/cache@v4
