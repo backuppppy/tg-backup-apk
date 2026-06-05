@@ -7,7 +7,7 @@ source.include_exts = py,png,jpg,kv,atlas,json,html,txt
 source.exclude_dirs = __pycache__,.git,bin,.buildozer
 
 version = 1.0
-requirements = python3,kivy==2.3.0,flask==3.0.3,werkzeug,telethon,cryptg,pyaes,colorama,jinja2,click,itsdangerous,markupsafe
+requirements = python3,kivy==2.3.1,flask==3.0.3,werkzeug,telethon,pyaes,colorama,jinja2,click,itsdangerous,markupsafe
 
 # entrypoint
 entrypoint = main.py
@@ -19,6 +19,9 @@ orientation = portrait
 android.api = 33
 android.minapi = 21
 android.ndk = 25b
+
+# Pin p4a to release that uses Python 3.11 (avoids 3.14 compile issues)
+p4a.branch = release-2024.01.21
 android.sdk = 33
 android.accept_sdk_license = True
 
