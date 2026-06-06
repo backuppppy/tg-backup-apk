@@ -311,6 +311,11 @@ def create_app():
     @app.route("/last_id")
     def last_id(): return jsonify({"last_id": _load_last_id()})
 
+    @app.route("/reset_last_id", methods=["POST"])
+    def reset_last_id():
+        _save_last_id(0)
+        return jsonify({"ok": True})
+
     @app.route("/logs")
     def stream_logs():
         def generate():

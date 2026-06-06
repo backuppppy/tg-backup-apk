@@ -339,7 +339,8 @@ async function pauseBot()  { await fetch('/pause',{method:'POST'}); }
 async function resumeBot() { await fetch('/resume',{method:'POST'}); }
 
 async function resetLastId() {
-  await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...gatherConfig(),_reset_last_id:true})});
+  if (!confirm('לאפס Last ID? הגיבוי יתחיל מחדש מההתחלה.')) return;
+  await fetch('/reset_last_id', {method:'POST'});
   document.getElementById('lastIdVal').textContent='0';
 }
 
