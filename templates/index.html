@@ -114,6 +114,7 @@
   <div class="tab active" onclick="switchTab(0)">חשבונות</div>
   <div class="tab" onclick="switchTab(1)">ערוצים</div>
   <div class="tab" onclick="switchTab(2)">לוג</div>
+  <div class="tab" onclick="switchTab(3)">אודות</div>
 </div>
 
 <!-- Accounts -->
@@ -170,6 +171,40 @@
     <button class="sm" onclick="clearLogs()">נקה</button>
   </div>
   <div id="log"></div>
+</div>
+
+<!-- About -->
+<div class="panel" id="p3">
+  <div class="info-box" style="margin-bottom:10px">
+    <strong style="color:#1565c0;font-size:1rem">TG Backup</strong>
+    <span style="font-size:.8rem;color:#555;margin-right:6px">גרסה {{ version }}</span>
+  </div>
+
+  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">משוב</div>
+  <p style="font-size:.85rem;color:#333;margin-bottom:8px">שאלות, הצעות, דיווח על בעיות — בקבוצת הטלגרם:</p>
+  <a href="{{ tg_group }}" target="_blank"
+     style="display:inline-block;background:#1565c0;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
+    הצטרף לקבוצה
+  </a>
+
+  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
+
+  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">קוד פתוח</div>
+  <p style="font-size:.85rem;color:#333;margin-bottom:8px">הפרויקט זמין ב-GitHub:</p>
+  <a href="{{ github }}" target="_blank"
+     style="display:inline-block;background:#333;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
+    GitHub
+  </a>
+
+  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
+
+  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">פרטיות</div>
+  <p style="font-size:.82rem;color:#555;line-height:1.6">
+    האפליקציה שולחת למפתח מידע אנונימי בלבד:<br>
+    • הודעה בכל פתיחת סשן (ספירת משתמשים)<br>
+    • שגיאות קריטיות בלבד (ללא מידע אישי)<br><br>
+    לא נשמר ולא נשלח מידע אישי, מספרי טלפון, תוכן הודעות, או פרטי חשבון.
+  </p>
 </div>
 
 <script>
@@ -334,7 +369,7 @@ function gatherConfig() {
     source_chat_id: document.getElementById('src').value.trim(),
     target_chat_id: document.getElementById('tgt').value.trim(),
     media_type: document.getElementById('mediaType').value,
-    start_from_id: parseInt(document.getElementById('startFromId').value) || 0,
+    start_from_id: parseInt(document.getElementById('startFromId')?.value) || 0,
   };
 }
 
@@ -344,7 +379,19 @@ async function saveConfig() {
   addLog({time:now(),level:'success',msg:'נשמר.'});
 }
 
-async function startBot()  { await saveConfig(); const r=await(await fetch('/start',{method:'POST'})).json(); if(!r.ok) addLog({time:now(),level:'error',msg:r.msg}); }
+async function startBot() {
+  try {
+    await saveConfig();
+    const r = await (await fetch('/start', {method:'POST'})).json();
+    if (!r.ok) {
+      addLog({time:now(), level:'error', msg:'שגיאה בהפעלה: ' + r.msg});
+      alert('שגיאה: ' + r.msg);
+    }
+  } catch(e) {
+    addLog({time:now(), level:'error', msg:'Start failed: ' + e});
+    alert('שגיאה בהפעלה: ' + e);
+  }
+}
 async function stopBot()   { await fetch('/stop',{method:'POST'}); }
 async function pauseBot()  { await fetch('/pause',{method:'POST'}); }
 async function resumeBot() { await fetch('/resume',{method:'POST'}); }

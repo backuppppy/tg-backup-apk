@@ -13,9 +13,33 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
+APP_VERSION  = "1.0"
+BOT_TOKEN    = "8867679619:AAFf7O96HEbKako4rE-xg_kAHe-OICOQVFw"
+REPORT_CHAT  = "@backuppppy"   # הבוט חייב להיות חבר בקבוצה
+TG_GROUP_URL = "https://t.me/backuppppy"
+GITHUB_URL   = "https://github.com/Betsalelush/tg-backup-apk"
+
 LOG_Q  = queue.Queue(maxsize=500)
 STATUS = {"running": False, "paused": False, "engine": None, "thread": None, "transferred": 0}
 AUTH_STATE = {}
+
+
+def _bot_send(text):
+    """שולח הודעה לבוט — לעולם לא זורק שגיאה"""
+    try:
+        import urllib.request, urllib.parse
+        data = urllib.parse.urlencode({
+            "chat_id": REPORT_CHAT,
+            "text": text,
+            "disable_notification": "true"
+        }).encode()
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data=data
+            ), timeout=5
+        )
+    except Exception:
+        pass
 
 DEFAULT_CFG = {
     "accounts": [],
@@ -233,7 +257,9 @@ class BackupEngine:
                 _log(f"Switching to account {idx+1}", "info")
                 await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
-                _log(f"Error: {exc}", "error"); await asyncio.sleep(30)
+                _log(f"Error: {exc}", "error")
+                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error:\n{exc}",), daemon=True).start()
+                await asyncio.sleep(30)
 
         for c in clients:
             try: await c.disconnect()
@@ -259,8 +285,18 @@ def _start_worker(config):
 def create_app():
     app = Flask(__name__, template_folder=TEMPLATE_DIR)
 
+    # שלח ping חד-פעמי בפתיחה
+    threading.Thread(
+        target=_bot_send,
+        args=(f"📱 TG Backup v{APP_VERSION} — new session opened",),
+        daemon=True
+    ).start()
+
     @app.route("/")
-    def index(): return render_template("index.html", config=_load_cfg())
+    def index(): return render_template("index.html", config=_load_cfg(),
+                                        version=APP_VERSION,
+                                        tg_group=TG_GROUP_URL,
+                                        github=GITHUB_URL)
 
     @app.route("/config", methods=["POST"])
     def update_config(): _save_cfg(request.json); return jsonify({"ok": True})
