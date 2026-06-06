@@ -23,6 +23,7 @@ DEFAULT_CFG = {
     "source_chat_id": "",
     "target_chat_id": "",
     "media_type": "video_doc",  # video_doc | photo | all_media | text | all
+    "start_from_id": 0,
 }
 
 # loop קבוע אחד לכל פעולות Telethon
@@ -129,21 +130,24 @@ async def _auth_password(acc, pw):
 class BackupEngine:
     def __init__(self, config):
         self.config = config
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()
         self.running = False
+        self._paused  = False   # simple flag — safe to read/write across threads (CPython GIL)
 
     def pause(self):
-        _TG_LOOP.call_soon_threadsafe(self._pause_event.clear)
+        self._paused = True
         _log("Paused.", "warn")
 
     def resume(self):
-        _TG_LOOP.call_soon_threadsafe(self._pause_event.set)
+        self._paused = False
         _log("Resumed.", "success")
 
     def stop(self):
         self.running = False
-        _TG_LOOP.call_soon_threadsafe(self._pause_event.set)
+        self._paused = False
+
+    async def _wait_if_paused(self):
+        while self._paused and self.running:
+            await asyncio.sleep(0.3)
 
     async def run(self):
         from telethon import TelegramClient, errors
@@ -151,6 +155,10 @@ class BackupEngine:
         source     = int(self.config["source_chat_id"])
         target     = int(self.config["target_chat_id"])
         media_type = self.config.get("media_type", "video_doc")
+        start_from = int(self.config.get("start_from_id") or 0)
+        if start_from:
+            _save_last_id(start_from)
+            _log(f"Starting from message ID {start_from}", "info")
 
         clients = []
         for acc in self.config.get("accounts", []):
@@ -182,7 +190,7 @@ class BackupEngine:
         idx = 0
 
         while self.running:
-            await self._pause_event.wait()
+            await self._wait_if_paused()
             if not self.running: break
             client = clients[idx]
             last_id = _load_last_id()
@@ -191,7 +199,8 @@ class BackupEngine:
                 max_batch = random.randint(2, 6)
                 async for msg in client.iter_messages(source, offset_id=last_id, reverse=True, limit=50):
                     if not self.running: break
-                    await self._pause_event.wait()
+                    await self._wait_if_paused()
+                    if not self.running: break
                     if msg.id > last_proc: last_proc = msg.id
 
                     if _msg_matches(msg, media_type):

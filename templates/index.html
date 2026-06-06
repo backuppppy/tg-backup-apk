@@ -152,6 +152,10 @@
     <button class="sm btn-del" style="margin-right:8px;margin-top:6px"
       onclick="resetLastId()">Reset</button>
   </div>
+  <div class="field" style="margin-top:10px">
+    <label>התחל מהודעה מספר (0 = המשך מהמקום האחרון)</label>
+    <input id="startFromId" type="number" min="0" placeholder="0" value="0">
+  </div>
 </div>
 
 <!-- Logs -->
@@ -173,6 +177,7 @@ function init() {
   document.getElementById('src').value = cfg.source_chat_id || '';
   document.getElementById('tgt').value = cfg.target_chat_id || '';
   if (cfg.media_type) document.getElementById('mediaType').value = cfg.media_type;
+  if (cfg.start_from_id) document.getElementById('startFromId').value = cfg.start_from_id;
   buildAccUI();
   pollStatus();
   setInterval(pollStatus, 2500);
@@ -324,6 +329,7 @@ function gatherConfig() {
     source_chat_id: document.getElementById('src').value.trim(),
     target_chat_id: document.getElementById('tgt').value.trim(),
     media_type: document.getElementById('mediaType').value,
+    start_from_id: parseInt(document.getElementById('startFromId').value) || 0,
   };
 }
 
