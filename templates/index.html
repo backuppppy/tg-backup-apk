@@ -147,6 +147,11 @@
     </select>
   </div>
   <div class="info-box">
+    <strong>הועברו בסשן זה:</strong>
+    <span class="big-num" id="transferredVal">0</span>
+    <span style="font-size:.85rem;color:#555;margin-right:8px">הודעות</span>
+  </div>
+  <div class="info-box" style="margin-top:8px">
     <strong>הודעה אחרונה שעובדה:</strong><br>
     <span class="big-num" id="lastIdVal">0</span>
     <button class="sm btn-del" style="margin-right:8px;margin-top:6px"
@@ -359,6 +364,7 @@ async function pollStatus() {
       fetch('/auth/status').then(r=>r.json()),
     ]);
     applyStatus(s.running, s.paused);
+    if (s.transferred !== undefined) document.getElementById('transferredVal').textContent = s.transferred;
     if (lid.last_id) document.getElementById('lastIdVal').textContent = lid.last_id;
     let changed = false;
     for (const [name, st] of Object.entries(ast)) {

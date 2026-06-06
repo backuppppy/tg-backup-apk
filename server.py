@@ -11,11 +11,10 @@ from flask import Flask, Response, jsonify, render_template, request
 
 DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-LAST_ID_FILE = os.path.join(DATA_DIR, "last_id.txt")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 LOG_Q  = queue.Queue(maxsize=500)
-STATUS = {"running": False, "paused": False, "engine": None, "thread": None}
+STATUS = {"running": False, "paused": False, "engine": None, "thread": None, "transferred": 0}
 AUTH_STATE = {}
 
 DEFAULT_CFG = {
@@ -45,12 +44,15 @@ def _save_cfg(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
-def _save_last_id(mid):
-    with open(LAST_ID_FILE, "w") as f: f.write(str(mid))
+def _last_id_path(source_id):
+    return os.path.join(DATA_DIR, f"last_id_{source_id}.txt")
 
-def _load_last_id():
+def _save_last_id(mid, source_id):
+    with open(_last_id_path(source_id), "w") as f: f.write(str(mid))
+
+def _load_last_id(source_id):
     try:
-        with open(LAST_ID_FILE) as f: return int(f.read().strip())
+        with open(_last_id_path(source_id)) as f: return int(f.read().strip())
     except Exception: return 0
 
 def _log(msg, level="info"):
@@ -157,8 +159,9 @@ class BackupEngine:
         media_type = self.config.get("media_type", "video_doc")
         start_from = int(self.config.get("start_from_id") or 0)
         if start_from:
-            _save_last_id(start_from)
+            _save_last_id(start_from, source)
             _log(f"Starting from message ID {start_from}", "info")
+        STATUS["transferred"] = 0
 
         clients = []
         for acc in self.config.get("accounts", []):
@@ -193,7 +196,7 @@ class BackupEngine:
             await self._wait_if_paused()
             if not self.running: break
             client = clients[idx]
-            last_id = _load_last_id()
+            last_id = _load_last_id(source)
             try:
                 batch = 0; last_proc = last_id
                 max_batch = random.randint(2, 6)
@@ -210,21 +213,22 @@ class BackupEngine:
                                 await client.send_message(target, caption, file=msg.media)
                             else:
                                 await client.send_message(target, caption)
-                            _log(f"[Acc {idx+1}] Copied msg {msg.id}", "success")
+                            STATUS["transferred"] += 1
+                            _log(f"[Acc {idx+1}] Copied msg {msg.id} — סה\"כ: {STATUS['transferred']}", "success")
                             batch += 1
                             await asyncio.sleep(random.uniform(1.4, 3.8))
                             if batch >= max_batch:
-                                _save_last_id(last_proc); break
+                                _save_last_id(last_proc, source); break
                         except errors.FloodWaitError as exc:
                             _log(f"FloodWait {exc.seconds}s — switching account", "warn")
-                            _save_last_id(last_proc); await asyncio.sleep(2.8); break
+                            _save_last_id(last_proc, source); await asyncio.sleep(2.8); break
                         except Exception as exc:
                             _log(f"Error msg {msg.id}: {exc}", "error")
                     else:
                         _log(f"[Acc {idx+1}] Skip {msg.id}", "warn")
 
                 if last_proc > last_id:
-                    _save_last_id(last_proc)
+                    _save_last_id(last_proc, source)
                 idx = (idx + 1) % len(clients)
                 _log(f"Switching to account {idx+1}", "info")
                 await asyncio.sleep(random.uniform(2, 6))
@@ -315,14 +319,17 @@ def create_app():
         return jsonify({"ok": True})
 
     @app.route("/status")
-    def status(): return jsonify({"running": STATUS["running"], "paused": STATUS["paused"]})
+    def status(): return jsonify({"running": STATUS["running"], "paused": STATUS["paused"], "transferred": STATUS["transferred"]})
 
     @app.route("/last_id")
-    def last_id(): return jsonify({"last_id": _load_last_id()})
+    def last_id():
+        src = _load_cfg().get("source_chat_id", "")
+        return jsonify({"last_id": _load_last_id(src) if src else 0})
 
     @app.route("/reset_last_id", methods=["POST"])
     def reset_last_id():
-        _save_last_id(0)
+        src = _load_cfg().get("source_chat_id", "")
+        if src: _save_last_id(0, src)
         return jsonify({"ok": True})
 
     @app.route("/logs")
