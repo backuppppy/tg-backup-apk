@@ -124,7 +124,9 @@ def _msg_matches(msg, media_type):
 async def _auth_send_code(acc):
     from telethon import TelegramClient
     name  = acc["client_name"]
-    phone = acc["phone_number"]
+    phone = acc["phone_number"].strip().replace(" ", "").replace("-", "")
+    if phone and not phone.startswith("+"):
+        phone = "+" + phone
     session_path = os.path.join(DATA_DIR, name)
     client = TelegramClient(session_path, int(acc["api_id"]), acc["api_hash"])
     await client.connect()
