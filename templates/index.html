@@ -349,7 +349,7 @@ async function sendCode(i) {
   await saveConfig();
   setStatus(i,'pending_code','שולח קוד…');
   const r = await (await fetch('/auth/send_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acc_idx:i})})).json();
-  if (r.ok && r.already) { updateConnStatus(i,'connected'); return; }
+  if (r.ok && r.already) { updateConnStatus(i,'connected'); addLog({time:now(),level:'warn',msg:`חשבון ${i+1}: כבר מחובר מסשן קודם — לחץ 🔌 נתק כדי לקבל קוד חדש`}); return; }
   if (r.ok) { updateConnStatus(i,'pending_code'); return; }
   updateConnStatus(i,'error'); addLog({time:now(),level:'error',msg:r.msg});
 }

@@ -48,8 +48,13 @@ jobs:
       - name: Build APK
         run: buildozer android debug
 
-      - name: Inject custom launcher icon into APK
+      - name: Inject custom launcher icon and re-sign with fixed key
         run: |
+          BT=$(ls ~/.buildozer/android/platform/android-sdk/build-tools/ | sort -V | tail -1)
+          BT_PATH=~/.buildozer/android/platform/android-sdk/build-tools/$BT
+          APK=$(ls bin/*.apk | head -1)
+
+          # Replace ic_launcher with custom logo
           python3 << 'PYEOF'
           import glob, os, io, zipfile
           from PIL import Image
@@ -68,52 +73,36 @@ jobs:
               buf = io.BytesIO()
               icon.resize((size, size), Image.LANCZOS).save(buf, 'PNG')
               new_icons[name] = buf.getvalue()
-              print(f'Generated {name} ({size}x{size}, {len(new_icons[name])} bytes)')
+              print(f'Icon {size}x{size}: {len(new_icons[name])} bytes')
 
-          tmp = apk + '.patched'
+          tmp = '/tmp/patched.apk'
           with zipfile.ZipFile(apk, 'r') as zin, \
                zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
               for info in zin.infolist():
                   if info.filename.startswith('META-INF/'):
-                      continue  # strip old signature
+                      continue
                   data = new_icons.get(info.filename, zin.read(info.filename))
                   zout.writestr(info, data)
           os.replace(tmp, apk)
           print(f'Patched: {apk}')
           PYEOF
 
-          # Find build-tools
-          BT=$(ls ~/.buildozer/android/platform/android-sdk/build-tools/ | sort -V | tail -1)
-          BT_PATH=~/.buildozer/android/platform/android-sdk/build-tools/$BT
-          APK=$(ls bin/*.apk | head -1)
-
-          # Create debug keystore
-          mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore ~/.android/debug.keystore \
-              -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -storepass android -keypass android -noprompt
-          fi
-
           # Zipalign
-          $BT_PATH/zipalign -f 4 "$APK" bin/aligned.apk
+          $BT_PATH/zipalign -f 4 "$APK" /tmp/aligned.apk
 
-          # Sign with apksigner (v1+v2)
+          # Sign with fixed debug keystore from repo (consistent across builds)
           $BT_PATH/apksigner sign \
-            --ks ~/.android/debug.keystore \
+            --ks debug.keystore \
             --ks-key-alias androiddebugkey \
             --ks-pass pass:android \
             --key-pass pass:android \
             --out "$APK" \
-            bin/aligned.apk
+            /tmp/aligned.apk
 
-          echo "APK ready: $APK"
+          echo "Done: $APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: tg-backup-debug
-          path: bin/*.apk
+          path: bin/tgbackup-*.apk
