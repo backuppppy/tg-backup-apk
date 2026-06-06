@@ -43,7 +43,7 @@ jobs:
           restore-keys: buildozer-
 
       - name: Install buildozer
-        run: pip install buildozer cython
+        run: pip install buildozer cython pillow
 
       - name: Build APK
         run: buildozer android debug

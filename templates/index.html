@@ -305,7 +305,8 @@ function buildConnForm(i, st) {
     <p style="color:#2e7d32;font-size:.85rem;margin-top:4px">✔ החשבון מחובר ומוכן</p>
     <button class="sm btn-del" style="margin-top:6px" onclick="disconnectAccount(${i})">🔌 נתק</button>`;
   if (st === 'pending_code') return `
-    <div class="conn-row" style="margin-top:6px">
+    <p style="font-size:.78rem;color:#e65100;margin-top:6px;margin-bottom:4px">📱 הקוד נשלח דרך <strong>אפליקציית טלגרם</strong> (לא SMS) — בדוק בהודעות מ"Telegram"</p>
+    <div class="conn-row">
       <input id="code${i}" type="number" placeholder="קוד אימות מהטלגרם">
       <button class="sm btn-connect" onclick="verifyCode(${i})">אמת קוד</button>
     </div>`;
