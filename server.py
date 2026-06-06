@@ -188,6 +188,7 @@ class BackupEngine:
             last_id = _load_last_id()
             try:
                 batch = 0; last_proc = last_id
+                max_batch = random.randint(2, 6)
                 async for msg in client.iter_messages(source, offset_id=last_id, reverse=True, limit=50):
                     if not self.running: break
                     await self._pause_event.wait()
@@ -203,12 +204,11 @@ class BackupEngine:
                             _log(f"[Acc {idx+1}] Copied msg {msg.id}", "success")
                             batch += 1
                             await asyncio.sleep(random.uniform(1.4, 3.8))
-                            if batch >= random.randint(2, 6):
+                            if batch >= max_batch:
                                 _save_last_id(last_proc); break
                         except errors.FloodWaitError as exc:
-                            wait = min(exc.seconds, 60)
-                            _log(f"FloodWait {exc.seconds}s (waiting {wait}s)", "warn")
-                            _save_last_id(last_proc); await asyncio.sleep(wait); break
+                            _log(f"FloodWait {exc.seconds}s — switching account", "warn")
+                            _save_last_id(last_proc); await asyncio.sleep(2.8); break
                         except Exception as exc:
                             _log(f"Error msg {msg.id}: {exc}", "error")
                     else:
@@ -217,6 +217,7 @@ class BackupEngine:
                 if last_proc > last_id:
                     _save_last_id(last_proc)
                 idx = (idx + 1) % len(clients)
+                _log(f"Switching to account {idx+1}", "info")
                 await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
                 _log(f"Error: {exc}", "error"); await asyncio.sleep(30)
