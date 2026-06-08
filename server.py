@@ -17,7 +17,7 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templat
 
 APP_VERSION  = "1.3"
 TG_GROUP_URL = "https://t.me/backuppppy"
-GITHUB_URL   = "https://github.com/Betsalelush/tg-backup-apk"
+GITHUB_URL   = "https://github.com/backuppppy/tg-backup-apk"
 
 LOG_Q  = queue.Queue(maxsize=500)
 STATUS = {"running": False, "paused": False, "engine": None, "thread": None, "transferred": 0}
