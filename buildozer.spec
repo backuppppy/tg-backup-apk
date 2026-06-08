@@ -7,7 +7,7 @@ source.include_exts = py,png,jpg,kv,atlas,json,html,txt
 source.exclude_dirs = __pycache__,.git,bin,.buildozer
 
 version = 1.3
-requirements = python3,kivy==2.3.1,flask==3.0.3,werkzeug,telethon,pyaes,rsa,pyasn1,colorama,jinja2,click,itsdangerous,markupsafe
+requirements = python3,kivy==2.3.1,flask==3.0.3,werkzeug,telethon,pyaes,rsa,pyasn1,colorama,jinja2,click,itsdangerous,markupsafe,sentry-sdk,certifi,urllib3
 
 # entrypoint
 entrypoint = main.py

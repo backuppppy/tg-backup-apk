@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>TG Backup</title>
+<script src="https://browser.sentry-cdn.com/7.120.0/bundle.min.js" crossorigin="anonymous"></script>
+<script>
+  Sentry.init({ dsn: "{{ sentry_dsn }}" });
+</script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;background:#fff;color:#111;
@@ -579,6 +583,8 @@ async function saveConfig() {
 }
 
 async function startBot() {
+  console.log('startBot: click received');
+  addLog({time:now(), level:'info', msg:'התקבלה לחיצה על Start…'});
   try {
     await saveConfig();
     const r = await (await fetch('/start', {method:'POST'})).json();
@@ -656,6 +662,9 @@ function connectSSE() {
 
 function addLog(entry) {
   if (entry.ping) return;
+  if (entry.level === 'error' && window.Sentry) {
+    Sentry.captureMessage(entry.msg, 'error');
+  }
   const box  = document.getElementById('log');
   const line = document.createElement('div');
   line.className = `ll ${entry.level||'info'}`;

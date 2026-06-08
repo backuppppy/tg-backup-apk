@@ -11,6 +11,12 @@ from datetime import datetime
 
 from flask import Flask, Response, jsonify, render_template, request
 
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+
+SENTRY_DSN = "https://1f490b846ede82cfc3d5f6f5eb23263b@o4510215210598400.ingest.de.sentry.io/4510674676744272"
+sentry_sdk.init(dsn=SENTRY_DSN, integrations=[FlaskIntegration()], traces_sample_rate=0.0)
+
 DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
@@ -834,7 +840,8 @@ def create_app():
     def index(): return render_template("index.html", config=_load_cfg(),
                                         version=APP_VERSION,
                                         tg_group=TG_GROUP_URL,
-                                        github=GITHUB_URL)
+                                        github=GITHUB_URL,
+                                        sentry_dsn=SENTRY_DSN)
 
     @app.route("/config", methods=["POST"])
     def update_config(): _save_cfg(request.json); return jsonify({"ok": True})
