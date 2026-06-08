@@ -149,6 +149,11 @@
     <span style="font-size:.85rem;color:#555;margin-right:8px">הודעות</span>
   </div>
 
+  <div class="info-box" id="jobsLiveBox" style="display:none">
+    <strong>היכן כל משימה נמצאת כרגע (מספר ה-ID האחרון שעובד):</strong>
+    <div id="jobsLiveList" style="margin-top:6px;font-size:.88rem;line-height:1.8"></div>
+  </div>
+
   <p style="font-size:.8rem;color:#555;margin:6px 0 10px">
     כל משימה מעבירה מערוץ מקור אחד לערוץ יעד אחד, עם תת-קבוצה משלה של חשבונות.
     אפשר להריץ כמה משימות במקביל — כל אחת עם הגדרות וחשבונות נפרדים. חשבון יכול
@@ -383,10 +388,10 @@ function buildJobUI() {
           <option value="all">הכל</option>
         </select>
       </div>
-      <div class="field">
-        <label>מצב עבודה (כששייכים למשימה כמה חשבונות)</label>
+      <div class="field" id="jmodewrap${i}" style="display:none">
+        <label>מצב עבודה (רלוונטי רק כששייכים למשימה כמה חשבונות)</label>
         <select id="jmode${i}" style="width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;background:#fff;color:#111;font-size:14px">
-          <option value="fast">⚡ מהיר — כולם פועלים יחד, ייתכן סדר מבולגן ביעד</option>
+          <option value="fast">⚡ מהיר — כל חשבון מטפל בקטע משלו, ייתכן סדר מבולגן ביעד</option>
           <option value="ordered">📑 מסודר — שומר על הסדר הכרונולוגי של המקור ביעד</option>
         </select>
       </div>
@@ -442,6 +447,11 @@ function renderJobAccounts(jobIdx) {
       ${label}${note}
     </label>`;
   }).join('');
+
+  // מצב עבודה (מהיר/מסודר) רלוונטי רק כשיש יותר מחשבון אחד במשימה — בחשבון
+  // יחיד אין שום הבדל בין המצבים, אז אין טעם להציג את הבחירה.
+  const modeWrap = document.getElementById(`jmodewrap${jobIdx}`);
+  if (modeWrap) modeWrap.style.display = ((jobs[jobIdx].account_indices||[]).length > 1) ? '' : 'none';
 }
 
 function toggleJobAccount(jobIdx, accIdx, checked) {
@@ -600,9 +610,24 @@ async function pollStatus() {
       const idx = jobs.findIndex(j => j.id === js.id);
       if (idx >= 0) {
         const el = document.getElementById(`jlast${idx}`);
-        if (el && js.last_id) el.textContent = js.last_id;
+        if (el) el.textContent = js.last_id ?? 0;
       }
     });
+    const liveBox  = document.getElementById('jobsLiveBox');
+    const liveList = document.getElementById('jobsLiveList');
+    if (liveBox && liveList) {
+      if (jst && jst.length) {
+        liveBox.style.display = '';
+        liveList.innerHTML = jst.map(js => {
+          const job = jobs.find(j => j.id === js.id);
+          const name = job?.name || js.id || '—';
+          return `<div>📍 <strong>${name}</strong> — אוחז כרגע בהודעה מספר
+                  <span style="font-family:monospace;background:#eef;padding:1px 6px;border-radius:4px">${js.last_id ?? 0}</span></div>`;
+        }).join('');
+      } else {
+        liveBox.style.display = 'none';
+      }
+    }
     let changed = false;
     for (const [name, st] of Object.entries(ast)) {
       if (authStatus[name] !== st) { authStatus[name]=st; changed=true; }
