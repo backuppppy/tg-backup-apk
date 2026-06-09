@@ -46,7 +46,10 @@ jobs:
         run: pip install buildozer cython pillow
 
       - name: Build APK
-        run: buildozer android debug
+        run: |
+          # Save keystore before buildozer can overwrite it
+          cp debug.keystore /tmp/repo-debug.keystore
+          buildozer android debug
 
       - name: Inject custom launcher icon and re-sign with fixed key
         run: |
@@ -92,7 +95,7 @@ jobs:
 
           # Sign with fixed debug keystore from repo (consistent across builds)
           $BT_PATH/apksigner sign \
-            --ks debug.keystore \
+            --ks /tmp/repo-debug.keystore \
             --ks-key-alias androiddebugkey \
             --ks-pass pass:android \
             --key-pass pass:android \
