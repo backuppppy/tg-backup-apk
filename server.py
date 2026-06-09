@@ -187,6 +187,9 @@ def _run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, _TG_LOOP)
     return future.result(timeout=60)
 
+def _is_webpage_media(media):
+    return media is not None and type(media).__name__ == 'MessageMediaWebPage'
+
 def _msg_matches(msg, media_type):
     if media_type == "video_doc":
         return (msg.video or msg.document) and not (msg.sticker or msg.photo)
@@ -363,6 +366,8 @@ class BackupEngine:
                                 await limiter.acquire()
                             if not msg.media:
                                 await client.send_message(target, caption)
+                            elif _is_webpage_media(msg.media):
+                                await client.send_message(target, msg.text or caption)
                             elif protected:
                                 await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                             else:
@@ -372,8 +377,6 @@ class BackupEngine:
                                     if "protected chat" in str(exc).lower():
                                         protected = True
                                         _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
-                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
-                                    elif "cannot use as file" in str(exc).lower() or "file reference" in str(exc).lower():
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
@@ -433,6 +436,8 @@ class BackupEngine:
                                 await limiter.acquire()
                             if not msg.media:
                                 await client.send_message(target, caption)
+                            elif _is_webpage_media(msg.media):
+                                await client.send_message(target, msg.text or caption)
                             elif protected:
                                 await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                             else:
@@ -442,8 +447,6 @@ class BackupEngine:
                                     if "protected chat" in str(exc).lower():
                                         protected = True
                                         _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
-                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
-                                    elif "cannot use as file" in str(exc).lower() or "file reference" in str(exc).lower():
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
@@ -574,7 +577,9 @@ class BackupEngine:
                 caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
                 payload = None
                 try:
-                    if msg.media and protected:
+                    if msg.media and _is_webpage_media(msg.media):
+                        payload = {"kind": "text", "caption": msg.text or "", "msg_id": msg.id}
+                    elif msg.media and protected:
                         work_dir = os.path.join(tmp_dir, f"{tag}_{msg.id}")
                         os.makedirs(work_dir, exist_ok=True)
                         path = await client.download_media(msg.media, file=work_dir + os.sep)

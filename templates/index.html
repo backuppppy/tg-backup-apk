@@ -655,8 +655,10 @@ async function startBot() {
       alert('שגיאה: ' + r.msg);
     }
   } catch(e) {
-    addLog({time:now(), level:'error', msg:'Start failed: ' + e});
-    alert('שגיאה בהפעלה: ' + e);
+    const serverDown = (e + '').toLowerCase().includes('fetch');
+    const msg = serverDown ? 'השרת לא מגיב — נסה להפעיל מחדש את האפליקציה' : ('Start failed: ' + e);
+    addLog({time:now(), level:'error', msg});
+    alert('שגיאה: ' + msg);
   }
 }
 async function stopBot()   { await fetch('/stop',{method:'POST'}); }
@@ -701,9 +703,14 @@ async function pollStatus() {
 function applyStatus(running, paused) {
   const dot = document.getElementById('dot');
   const txt = document.getElementById('statusText');
+  const bStart = document.getElementById('bStart');
   dot.className = running?(paused?'pause':'on'):'';
   txt.textContent = running?(paused?'מושהה':'פועל'):'עצור';
-  document.getElementById('bStart').disabled  = false;
+  bStart.textContent = running ? '⏳ פועל…' : '▶ Start';
+  bStart.style.background = running ? '#1565c0' : '';
+  bStart.style.borderColor = running ? '#1565c0' : '';
+  bStart.style.opacity = running ? '1' : '';
+  bStart.disabled = false;
   document.getElementById('bStop').disabled   = !running;
   document.getElementById('bPause').disabled  = !running||paused;
   document.getElementById('bResume').disabled = !running||!paused;
