@@ -221,10 +221,9 @@
   <!-- פרטיות -->
   <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">פרטיות</div>
   <p style="font-size:.82rem;color:#555;line-height:1.6">
-    האפליקציה שולחת לקבוצת הטלגרם מידע אנונימי בלבד:<br>
-    • רישום חד-פעמי בהתחברות הראשונה (hash אנונימי, ללא פרטים מזהים)<br>
-    • שגיאות קריטיות בלבד (ללא מידע אישי)<br><br>
-    לא נשמר ולא נשלח: מספרי טלפון, תוכן הודעות, פרטי חשבון, או כל מידע מזהה.
+    כשמתרחשת שגיאה באפליקציה, פרטי השגיאה נשלחים אוטומטית לשירות ניטור השגיאות Sentry,
+    כדי שנוכל לאתר ולתקן תקלות.<br><br>
+    לא נשמר ולא נשלח: מספרי טלפון, תוכן הודעות, פרטי חשבון, או כל מידע מזהה אישית.
   </p>
 </div>
 
@@ -406,6 +405,7 @@ function buildJobUI() {
       <div class="info-box">
         <strong>הודעה אחרונה שעובדה:</strong><br>
         <span class="big-num" id="jlast${i}">0</span>
+        <a id="jlastlink${i}" href="#" target="_blank" style="display:none;margin-right:8px;font-size:.85rem">פתח בטלגרם ↗</a>
         <button class="sm btn-del" style="margin-right:8px;margin-top:6px" onclick="resetJobLastId(${i})">Reset</button>
       </div>
       <div class="field" style="margin-top:10px">
@@ -545,7 +545,16 @@ function applyJobStatus(jst) {
     const bResume = document.getElementById(`jbResume${idx}`);
     const bStop   = document.getElementById(`jbStop${idx}`);
     const lastEl  = document.getElementById(`jlast${idx}`);
+    const linkEl  = document.getElementById(`jlastlink${idx}`);
     if (lastEl) lastEl.textContent = js.last_id ?? 0;
+    if (linkEl) {
+      if (js.last_link) {
+        linkEl.href = js.last_link;
+        linkEl.style.display = 'inline';
+      } else {
+        linkEl.style.display = 'none';
+      }
+    }
     if (dot) {
       dot.style.background  = js.running ? (js.paused ? '#e65100' : '#2e7d32') : '#bbb';
       dot.style.boxShadow   = js.running ? (js.paused ? '0 0 5px #e65100' : '0 0 5px #2e7d32') : 'none';
@@ -685,8 +694,9 @@ async function pollStatus() {
         liveList.innerHTML = jst.map(js => {
           const job = jobs.find(j => j.id === js.id);
           const name = job?.name || js.id || '—';
+          const link = js.last_link ? ` <a href="${js.last_link}" target="_blank">פתח ↗</a>` : '';
           return `<div>📍 <strong>${name}</strong> — אוחז כרגע בהודעה מספר
-                  <span style="font-family:monospace;background:#eef;padding:1px 6px;border-radius:4px">${js.last_id ?? 0}</span></div>`;
+                  <span style="font-family:monospace;background:#eef;padding:1px 6px;border-radius:4px">${js.last_id ?? 0}</span>${link}</div>`;
         }).join('');
       } else {
         liveBox.style.display = 'none';

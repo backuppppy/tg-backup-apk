@@ -7,6 +7,7 @@ import random
 import re
 import shutil
 import threading
+import time
 from datetime import datetime
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -21,7 +22,7 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-APP_VERSION  = "1.4.1"
+APP_VERSION  = "1.4.2"
 TG_GROUP_URL = "https://t.me/backuppppy"
 GITHUB_URL   = "https://github.com/backuppppy/tg-backup-apk"
 
@@ -161,6 +162,16 @@ def _clear_wave(job_key, source_id):
     try: os.remove(_wave_path(job_key, source_id))
     except Exception: pass
 
+def _message_link(source_chat_id, msg_id):
+    if not msg_id:
+        return None
+    s = str(source_chat_id)
+    if s.startswith("-100"):
+        s = s[4:]
+    elif s.startswith("-"):
+        s = s[1:]
+    return f"https://t.me/c/{s}/{msg_id}"
+
 def _job_progress(job, total_accounts):
     job_key = job.get("id") or ""
     try:
@@ -212,6 +223,17 @@ async def _auth_send_code(acc):
     phone = acc["phone_number"].strip().replace(" ", "").replace("-", "")
     if phone and not phone.startswith("+"):
         phone = "+" + phone
+
+    # If this account already has a live, connected session (e.g. a job is
+    # actively using it), don't open a second SQLite connection to the same
+    # .session file — that causes "database is locked" and leaves the old
+    # client orphaned with dangling background tasks. Just report it as
+    # already connected.
+    state = AUTH_STATE.get(name)
+    if state and state.get("status") == "connected" and state.get("client"):
+        if state["client"].is_connected():
+            return {"ok": True, "already": True}
+
     session_path = os.path.join(DATA_DIR, name)
     client = TelegramClient(session_path, int(acc["api_id"]), acc["api_hash"])
     await client.connect()
@@ -398,13 +420,17 @@ class BackupEngine:
                 if not protected:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
-                _log(f"[{tag}] Error: {exc}", "error")
-                if not client.is_connected():
-                    try:
-                        _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
-                        await client.connect()
-                    except Exception: pass
-                await asyncio.sleep(30)
+                if "database is locked" in str(exc).lower():
+                    _log(f"[{tag}] מסד הנתונים נעול זמנית — מנסה שוב", "warn")
+                    await asyncio.sleep(2)
+                else:
+                    _log(f"[{tag}] Error: {exc}", "error")
+                    if not client.is_connected():
+                        try:
+                            _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
+                            await client.connect()
+                        except Exception: pass
+                    await asyncio.sleep(30)
 
     async def _range_worker(self, client, idx, total, job_tag, job_key, source, target, media_type,
                             protected, tmp_dir, limiter, range_start, range_end):
@@ -471,13 +497,17 @@ class BackupEngine:
                 if not reached_end and not protected:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
-                _log(f"[{tag}] Error: {exc}", "error")
-                if not client.is_connected():
-                    try:
-                        _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
-                        await client.connect()
-                    except Exception: pass
-                await asyncio.sleep(30)
+                if "database is locked" in str(exc).lower():
+                    _log(f"[{tag}] מסד הנתונים נעול זמנית — מנסה שוב", "warn")
+                    await asyncio.sleep(2)
+                else:
+                    _log(f"[{tag}] Error: {exc}", "error")
+                    if not client.is_connected():
+                        try:
+                            _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
+                            await client.connect()
+                        except Exception: pass
+                    await asyncio.sleep(30)
 
         if reached_end:
             _save_worker_id(range_end, job_key, source, idx, total)
@@ -1028,9 +1058,11 @@ def create_app():
             n   = len(job.get("account_indices") or [])
             jid = job.get("id", "")
             st  = JOB_STATES.get(jid, {})
+            last_id = _job_progress(job, n)
             out.append({
                 "id":      jid,
-                "last_id": _job_progress(job, n),
+                "last_id": last_id,
+                "last_link": _message_link(job.get("source_chat_id"), last_id),
                 "running": st.get("running", False),
                 "paused":  st.get("paused",  False),
             })
