@@ -23,6 +23,9 @@ import org.tgbackup.app.tg.SendOutcome
 import org.tgbackup.app.tg.getOrNull
 import org.tgbackup.app.tg.serverId
 import kotlin.random.Random
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class RateLimiter(private val perMinute: Int) {
     private val stamps = ArrayDeque<Long>()
@@ -299,10 +302,13 @@ class JobRunner(
         val who = if (accounts.size > 1) "$tag · ${sender.tag}" else tag
         var attempts = 0
         var downloaded: Copier.Downloaded? = null
+        var uploadCopy: File? = null
+        // Set when a server-side copy of this message failed: retry it as download + upload.
+        var forceUpload = false
         try {
             while (true) {
                 awaitNotPaused()
-                val upload = needsUpload(msg)
+                val upload = needsUpload(msg) || (forceUpload && msg.content.mainFile() != null)
                 if (protected && !upload && msg.content !is MessageText) {
                     log.warn("[$who] הודעה $sid מסוג שלא ניתן להעתיק מערוץ מוגן — דילוג")
                     return false
@@ -324,7 +330,14 @@ class JobRunner(
                         delay(5_000)
                         continue
                     }
-                    Copier.uploadContent(msg, d.path, job.stripLinks)
+                    // Upload from a fresh copy: given TDLib's own cached path, TDLib would reuse the
+                    // protected remote file and Telegram rejects it as "can't be forwarded".
+                    val copy = uploadCopy ?: freshCopy(sender, sid, d.path).getOrElse { e ->
+                        log.error("[$who] הכנת קובץ להעלאה נכשלה: ${e.message}")
+                        report.failed()
+                        return false
+                    }.also { uploadCopy = it }
+                    Copier.uploadContent(msg, copy.absolutePath, job.stripLinks)
                 } else {
                     Copier.copyContent(msg, job.stripLinks)
                 }
@@ -351,9 +364,14 @@ class JobRunner(
                             delay((r.retryAfterSec + 1) * 1000L)
                             continue
                         }
-                        if (!upload && msg.content.mainFile() != null && Copier.isProtectedError(r.message)) {
-                            protected = true
-                            log.warn("[$who] זוהה ערוץ מוגן — עובר למצב הורדה והעלאה")
+                        if (!upload && msg.content.mainFile() != null) {
+                            forceUpload = true
+                            if (Copier.isProtectedError(r.message)) {
+                                protected = true
+                                log.warn("[$who] זוהה ערוץ מוגן — עובר למצב הורדה והעלאה")
+                            } else {
+                                log.warn("[$who] העתקה ישירה של $sid נכשלה (${r.message}) — מנסה בהורדה והעלאה")
+                            }
                             continue
                         }
                         log.error("[$who] שליחת הודעה $sid נכשלה: ${r.code} ${r.message}")
@@ -369,6 +387,16 @@ class JobRunner(
             }
         } finally {
             downloaded?.let { runCatching { it.owner.deleteLocal(it.fileId) } }
+            uploadCopy?.parentFile?.deleteRecursively()
         }
     }
+
+    private suspend fun freshCopy(sender: AccountClient, sid: Long, path: String): Result<File> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val src = File(path)
+                val dir = File(sender.baseDir, "upload/$sid").apply { mkdirs() }
+                File(dir, src.name).also { src.copyTo(it, overwrite = true) }
+            }
+        }
 }

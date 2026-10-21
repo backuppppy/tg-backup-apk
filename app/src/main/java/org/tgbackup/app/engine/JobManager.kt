@@ -155,6 +155,10 @@ class JobManager(
         start(j.id)?.let { "${j.name.ifBlank { j.id }}: $it" }
     }
 
+    fun pauseAll() = store.config.value.jobs.forEach { pause(it.id) }
+
+    fun resumeAll() = store.config.value.jobs.forEach { if (isRunning(it.id)) resume(it.id) }
+
     fun stopAll() = store.config.value.jobs.forEach { if (isRunning(it.id)) stop(it.id) }
 
     fun resetProgress(jobId: String) {

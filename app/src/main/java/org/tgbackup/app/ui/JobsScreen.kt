@@ -65,12 +65,23 @@ fun JobsScreen() {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val errors = app.jobs.startAll()
-                    if (errors.isNotEmpty()) toast(errors.joinToString("\n"))
-                }) { Text("▶ הפעל הכל") }
-                OutlinedButton(onClick = { app.jobs.stopAll() }) { Text("⏹ עצור הכל") }
+            val active = statuses.values.filter { it.running }
+            val total = statuses.values.sumOf { it.copied }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    if (active.isEmpty()) "⚪ עצור · הועתקו בהרצה זו: $total"
+                    else "🟢 ${active.size} משימות פעילות · הועתקו בהרצה זו: $total",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val errors = app.jobs.startAll()
+                        if (errors.isNotEmpty()) toast(errors.joinToString("\n"))
+                    }) { Text("▶ הפעל הכל") }
+                    OutlinedButton(enabled = active.any { !it.paused }, onClick = { app.jobs.pauseAll() }) { Text("⏸ השהה הכל") }
+                    OutlinedButton(enabled = active.any { it.paused }, onClick = { app.jobs.resumeAll() }) { Text("▶ המשך הכל") }
+                    OutlinedButton(enabled = active.isNotEmpty(), onClick = { app.jobs.stopAll() }) { Text("⏹ עצור הכל") }
+                }
             }
         }
         if (cfg.accounts.isEmpty()) {
@@ -92,7 +103,8 @@ fun JobsScreen() {
     }
 
     editing?.let { job ->
-        JobDialog(job, cfg.accounts, onDismiss = { editing = null }) { saved ->
+        val usedElsewhere = cfg.jobs.filter { it.id != job.id }.flatMap { it.accountIds }.toSet()
+        JobDialog(job, cfg.accounts, usedElsewhere, onDismiss = { editing = null }) { saved ->
             app.store.updateConfig { c ->
                 val exists = c.jobs.any { it.id == saved.id }
                 c.copy(jobs = if (exists) c.jobs.map { if (it.id == saved.id) saved else it } else c.jobs + saved)
@@ -190,7 +202,7 @@ private fun JobCard(
 }
 
 @Composable
-private fun JobDialog(initial: Job, accounts: List<Account>, onDismiss: () -> Unit, onSave: (Job) -> Unit) {
+private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<String>, onDismiss: () -> Unit, onSave: (Job) -> Unit) {
     var name by remember { mutableStateOf(initial.name) }
     var source by remember { mutableStateOf(initial.source) }
     var target by remember { mutableStateOf(initial.target) }
@@ -217,17 +229,21 @@ private fun JobDialog(initial: Job, accounts: List<Account>, onDismiss: () -> Un
                 Text("סוג תוכן", style = MaterialTheme.typography.labelLarge)
                 MediaType.entries.forEach { t -> RadioRow(t.label, mediaType == t) { mediaType = t } }
 
-                Text("חשבונות", style = MaterialTheme.typography.labelLarge)
+                Text("חשבונות (חשבון אחד — למשימה אחת בלבד)", style = MaterialTheme.typography.labelLarge)
                 if (accounts.isEmpty()) Text("אין חשבונות — הוסף בלשונית 'חשבונות'", color = MaterialTheme.colorScheme.error)
                 accounts.forEach { acc ->
+                    val taken = acc.id in usedElsewhere && acc.id !in selected
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().clickable {
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = !taken) {
                             selected = if (acc.id in selected) selected - acc.id else selected + acc.id
                         },
                     ) {
-                        Checkbox(checked = acc.id in selected, onCheckedChange = null)
-                        Text(acc.name.ifBlank { acc.phone })
+                        Checkbox(checked = acc.id in selected, onCheckedChange = null, enabled = !taken)
+                        Text(
+                            acc.name.ifBlank { acc.phone } + if (taken) " (משויך למשימה אחרת)" else "",
+                            color = if (taken) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f) else MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                 }
 
