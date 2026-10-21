@@ -12,7 +12,7 @@ val appVersionCode = 2_000_020_000
 
 android {
     namespace = "org.tgbackup.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "org.tgbackup.tgbackup"

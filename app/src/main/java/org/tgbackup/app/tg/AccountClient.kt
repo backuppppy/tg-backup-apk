@@ -257,6 +257,28 @@ class AccountClient(
         return if (lastErr != null) Result.failure(RuntimeException(lastErr)) else Result.success(emptyList())
     }
 
+    /**
+     * All messages with server ids in (afterServerId, afterServerId + span], oldest first,
+     * read backwards page by page so nothing in the range is missed. Used to confirm that a
+     * range is really empty before skipping over it.
+     */
+    suspend fun range(chatId: Long, afterServerId: Long, span: Long = 50): Result<List<Message>> {
+        val out = ArrayList<Message>()
+        var anchor = afterServerId + span + 1
+        while (anchor > afterServerId + 1) {
+            val page = when (val r = client.getChatHistory(chatId, anchor shl 20, 0, 50, false)) {
+                is TdlResult.Success -> r.result.messages.filterNotNull().filter {
+                    it.id.serverId() in (afterServerId + 1) until anchor
+                }
+                is TdlResult.Failure -> return Result.failure(RuntimeException("${r.code}: ${r.message}"))
+            }
+            if (page.isEmpty()) break
+            out += page
+            anchor = page.minOf { it.id.serverId() }
+        }
+        return Result.success(out.distinctBy { it.id }.sortedBy { it.id })
+    }
+
     suspend fun latestServerId(chatId: Long): Long? {
         val r = client.getChatHistory(chatId, 0, 0, 1, false).getOrNull() ?: return null
         return r.messages.filterNotNull().maxOfOrNull { it.id.serverId() } ?: 0L

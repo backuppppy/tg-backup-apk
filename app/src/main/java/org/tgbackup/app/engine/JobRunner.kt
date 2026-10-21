@@ -90,6 +90,8 @@ class JobRunner(
             val target = ac.resolveChat(job.target).getOrThrow()
             Pair2(source, target)
         }
+        // An opened chat keeps its loaded messages in TDLib memory, which copying relies on.
+        accounts.forEachIndexed { i, ac -> ac.client.openChat(chats[i].source.id) }
         val source = chats[0].source
         protected = source.hasProtectedContent
         report.sourceInfo(source.id, source.title, protected)
@@ -130,7 +132,7 @@ class JobRunner(
             ensureActive()
             awaitNotPaused()
             report.phase("סורק הודעות אחרי $last")
-            val batch = sender.historyAfter(src, last).getOrElse { e ->
+            var batch = sender.historyAfter(src, last).getOrElse { e ->
                 log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
                 report.phase("שגיאת רשת — מנסה שוב")
                 delay(15_000)
@@ -139,18 +141,25 @@ class JobRunner(
 
             if (batch.isEmpty()) {
                 val latest = sender.latestServerId(src) ?: last
-                if (latest > last) {
-                    // Nothing came back although newer messages exist (a long run of deleted ids).
-                    val next = minOf(last + 50, latest)
-                    log.warn("[$tag] אין הודעות בטווח ${last + 1}–$next — ממשיך הלאה")
+                if (latest <= last) {
+                    report.phase("מעודכן — ממתין להודעות חדשות")
+                    delay(60_000)
+                    continue
+                }
+                // Newer messages exist but none came back: check the next range explicitly.
+                val next = minOf(last + 50, latest)
+                batch = sender.range(src, last, next - last).getOrElse { e ->
+                    log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
+                    delay(15_000)
+                    null
+                } ?: continue
+                if (batch.isEmpty()) {
+                    // A run of deleted message ids.
                     last = next
                     store.saveProgress(job.id) { it.copy(lastId = last) }
                     report.position(last)
                     continue
                 }
-                report.phase("מעודכן — ממתין להודעות חדשות")
-                delay(60_000)
-                continue
             }
 
             val wanted = batch.filter { it.content.matches(job.mediaType) }
@@ -257,7 +266,15 @@ class JobRunner(
                 delay(15_000)
                 null
             } ?: continue
-            val inRange = batch.filter { it.id.serverId() <= re }
+            var inRange = batch.filter { it.id.serverId() <= re }
+            if (batch.isEmpty()) {
+                // Nothing came back — read the rest of the range explicitly before calling it done.
+                inRange = ac.range(chats.source.id, last, re - last).getOrElse { e ->
+                    log.error("[$tag · ${ac.tag}] קריאת היסטוריה נכשלה: ${e.message}")
+                    delay(15_000)
+                    null
+                } ?: continue
+            }
             if (inRange.isEmpty()) break
             for (msg in inRange) {
                 awaitNotPaused()
@@ -340,6 +357,8 @@ class JobRunner(
                             continue
                         }
                         log.error("[$who] שליחת הודעה $sid נכשלה: ${r.code} ${r.message}")
+                        // Reload the source message in case TDLib dropped it from memory.
+                        sender.client.getMessage(msg.chatId, msg.id)
                         if (++attempts >= 3) {
                             report.failed()
                             return false
