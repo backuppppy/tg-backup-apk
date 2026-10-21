@@ -5,6 +5,9 @@ on:
     branches: [ main, kotlin-rewrite ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -40,3 +43,15 @@ jobs:
         with:
           name: tg-backup
           path: out/*.apk
+
+      - name: Attach APK to the matching GitHub release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -oP 'appVersionName = "\K[^"]+' app/build.gradle.kts)
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" out/*.apk --clobber
+          else
+            echo "No release v$VERSION — skipping"
+          fi
