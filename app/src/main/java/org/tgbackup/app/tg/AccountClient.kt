@@ -204,26 +204,27 @@ class AccountClient(
 
     private suspend fun findChat(input: String): Chat? {
         Regex("""t\.me/c/(\d+)""").find(input)?.let { m ->
-            return chatById(-1_000_000_000_000L - m.groupValues[1].toLong())
+            return chatByIds(listOf(-CHANNEL_SHIFT - m.groupValues[1].toLong()))
         }
-        input.toLongOrNull()?.let { return chatById(it) }
+        input.toLongOrNull()?.let { n -> return chatByIds(idCandidates(n)) }
         val username = Regex("""(?:t\.me/|@)?([A-Za-z][A-Za-z0-9_]{3,})/?$""").find(input.removePrefix("https://"))
             ?.groupValues?.get(1) ?: return null
         return client.searchPublicChat(username).getOrNull()
     }
 
-    private suspend fun chatById(id: Long): Chat? {
-        client.getChat(id).getOrNull()?.let { return it }
-        when {
-            id <= -1_000_000_000_000L -> {
-                val sg = -id - 1_000_000_000_000L
-                if (client.getSupergroup(sg).getOrNull() != null) {
-                    client.createSupergroupChat(sg, false).getOrNull()?.let { return it }
-                }
-            }
-            id < 0 -> client.createBasicGroupChat(-id, false).getOrNull()?.let { return it }
-            else -> client.createPrivateChat(id, false).getOrNull()?.let { return it }
-        }
+    /**
+     * The same chat can be written in several ways: -1001922547087 (full), 1922547087
+     * (as in t.me/c/ links and some bots) or -1922547087. Bare numbers are tried as a
+     * channel/supergroup first, then as a group, then as a user.
+     */
+    private fun idCandidates(n: Long): List<Long> = when {
+        n <= -CHANNEL_SHIFT -> listOf(n)
+        n < 0 -> listOf(-CHANNEL_SHIFT + n, n)
+        else -> listOf(-CHANNEL_SHIFT - n, -n, n)
+    }
+
+    private suspend fun chatByIds(ids: List<Long>): Chat? {
+        for (id in ids) chatById(id)?.let { return it }
         // The chat may simply not be loaded into TDLib yet — load the chat lists and retry.
         for (list in listOf(ChatListMain(), ChatListArchive())) {
             for (page in 0 until 30) {
@@ -231,7 +232,20 @@ class AccountClient(
                 if (client.loadChats(list, 200) is TdlResult.Failure) break
             }
         }
-        return client.getChat(id).getOrNull()
+        for (id in ids) client.getChat(id).getOrNull()?.let { return it }
+        return null
+    }
+
+    private suspend fun chatById(id: Long): Chat? {
+        client.getChat(id).getOrNull()?.let { return it }
+        return when {
+            id <= -CHANNEL_SHIFT -> {
+                val sg = -id - CHANNEL_SHIFT
+                if (client.getSupergroup(sg).getOrNull() != null) client.createSupergroupChat(sg, false).getOrNull() else null
+            }
+            id < 0 -> client.createBasicGroupChat(-id, false).getOrNull()
+            else -> client.createPrivateChat(id, false).getOrNull()
+        }
     }
 
     suspend fun refreshChat(chatId: Long): Chat? = client.getChat(chatId).getOrNull()
@@ -325,6 +339,7 @@ class AccountClient(
     }
 
     companion object {
+        private const val CHANNEL_SHIFT = 1_000_000_000_000L
         private val retryRegex = Regex("""retry after (\d+)""", RegexOption.IGNORE_CASE)
 
         fun retryAfter(code: Int, message: String): Int {

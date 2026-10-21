@@ -211,8 +211,8 @@ private fun JobDialog(initial: Job, accounts: List<Account>, onDismiss: () -> Un
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 OutlinedTextField(name, { name = it }, label = { Text("שם המשימה") }, singleLine = true)
-                OutlinedTextField(source, { source = it.trim() }, label = { Text("מקור: ‎-100… / @username / קישור") }, singleLine = true)
-                OutlinedTextField(target, { target = it.trim() }, label = { Text("יעד: ‎-100… / @username / קישור") }, singleLine = true)
+                OutlinedTextField(source, { source = it.trim() }, label = { Text("מקור: מזהה (עם או בלי ‎-100) / @username / קישור") }, singleLine = true)
+                OutlinedTextField(target, { target = it.trim() }, label = { Text("יעד: מזהה (עם או בלי ‎-100) / @username / קישור") }, singleLine = true)
 
                 Text("סוג תוכן", style = MaterialTheme.typography.labelLarge)
                 MediaType.entries.forEach { t -> RadioRow(t.label, mediaType == t) { mediaType = t } }
