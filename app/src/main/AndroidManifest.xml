@@ -17,6 +17,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TgBackup">
 
+        <!-- Sentry is initialised in App.onCreate with the same DSN as the old app. -->
+        <meta-data android:name="io.sentry.auto-init" android:value="false" />
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"

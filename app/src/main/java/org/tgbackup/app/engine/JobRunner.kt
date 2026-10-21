@@ -23,6 +23,8 @@ import org.tgbackup.app.tg.SendOutcome
 import org.tgbackup.app.tg.getOrNull
 import org.tgbackup.app.tg.serverId
 import kotlin.random.Random
+import io.sentry.Sentry
+import io.sentry.SentryLevel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -375,6 +377,13 @@ class JobRunner(
                             continue
                         }
                         log.error("[$who] שליחת הודעה $sid נכשלה: ${r.code} ${r.message}")
+                        if (attempts == 2) {
+                            Sentry.captureMessage("Send failed: ${r.code} ${r.message}", SentryLevel.WARNING) { s ->
+                                s.setTag("job", tag)
+                                s.setExtra("message_id", sid.toString())
+                                s.setExtra("upload", upload.toString())
+                            }
+                        }
                         // Reload the source message in case TDLib dropped it from memory.
                         sender.client.getMessage(msg.chatId, msg.id)
                         if (++attempts >= 3) {

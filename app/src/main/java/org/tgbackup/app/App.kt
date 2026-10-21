@@ -3,6 +3,7 @@ package org.tgbackup.app
 import android.app.Application
 import android.content.Intent
 import android.os.Build
+import io.sentry.android.core.SentryAndroid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +31,12 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        SentryAndroid.init(this) { options ->
+            options.dsn = SENTRY_DSN
+            options.release = "tgbackup@${BuildConfig.VERSION_NAME}"
+            options.tracesSampleRate = 0.0
+            options.isAttachThreads = true
+        }
         log = LogBus(filesDir)
         store = Store(filesDir)
         accounts = AccountManager(filesDir, log)
@@ -56,6 +63,8 @@ class App : Application() {
     }
 
     companion object {
+        const val SENTRY_DSN = "https://1f490b846ede82cfc3d5f6f5eb23263b@o4510215210598400.ingest.de.sentry.io/4510674676744272"
+
         lateinit var instance: App
             private set
     }
