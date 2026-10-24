@@ -151,8 +151,10 @@ internal class MtpSession(
         try {
             sendRaw(msgId, nextSeq(true), p.body)
         } catch (e: java.io.IOException) {
-            // The reader will reconnect and resend everything that is pending.
-            dropConnection(tcp)
+            // Reconnect and resend everything that is pending.
+            val t = tcp
+            dropConnection(t)
+            if (t == null) scope.launch { reconnectAndResend() }
         }
     }
 
@@ -195,10 +197,15 @@ internal class MtpSession(
         return aesKey to aesIv
     }
 
+    @Volatile
+    private var lastReceived = System.currentTimeMillis()
+
     private suspend fun readLoop(t: ObfuscatedTcp) {
+        lastReceived = System.currentTimeMillis()
         try {
             while (scope.isActive && !t.closed) {
                 val packet = t.receive()
+                lastReceived = System.currentTimeMillis()
                 handlePacket(packet)
             }
         } catch (e: TransportException) {
@@ -371,6 +378,12 @@ internal class MtpSession(
         while (scope.isActive && !closed) {
             delay(30_000)
             val t = tcp ?: continue
+            if (System.currentTimeMillis() - lastReceived > 75_000) {
+                // No pong for a long time: the connection is dead even if the socket is not.
+                log("DC${dc.id}: no data for 75s, reconnecting")
+                dropConnection(t)
+                continue
+            }
             runCatching {
                 sendRaw(nextMsgId(), nextSeq(true), MTPPing_delay_disconnect(Crypto.random.nextLong(), 75).toBytes())
             }.onFailure { dropConnection(t) }
