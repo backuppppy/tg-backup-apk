@@ -33,7 +33,7 @@ class App : Application() {
         instance = this
         SentryAndroid.init(this) { options ->
             options.dsn = SENTRY_DSN
-            options.release = "tgbackup@${BuildConfig.VERSION_NAME}"
+            options.release = "tgbackup-export@${BuildConfig.VERSION_NAME}"
             options.tracesSampleRate = 0.0
             options.isAttachThreads = true
         }
@@ -63,7 +63,9 @@ class App : Application() {
     }
 
     companion object {
-        const val SENTRY_DSN = "https://1f490b846ede82cfc3d5f6f5eb23263b@o4510215210598400.ingest.de.sentry.io/4510674676744272"
+        // The takeout-export branch reports to its own Sentry project, apart from
+        // the regular TG Backup builds.
+        const val SENTRY_DSN = "https://e02d804de729ebc80b61b875138bc50e@o4510215210598400.ingest.de.sentry.io/4512308552859728"
 
         lateinit var instance: App
             private set

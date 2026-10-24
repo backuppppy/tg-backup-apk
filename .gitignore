@@ -6,3 +6,7 @@ local.properties
 .kotlin/
 *.apk
 *.aab
+
+export-core/build/
+export-core/.gradle/
+export-core/.kotlin/

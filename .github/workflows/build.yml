@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ main, kotlin-rewrite ]
+    branches: [ main, kotlin-rewrite, takeout-export ]
   workflow_dispatch:
 
 permissions:
