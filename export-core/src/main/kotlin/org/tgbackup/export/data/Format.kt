@@ -328,6 +328,17 @@ object Countries {
         return "+" + best.callingCode + " " + formattedResult
     }
 
+    fun countryNameByISO2(iso: String): String = list().firstOrNull { it.iso2 == iso }?.name ?: ""
+
+    fun flagEmojiByISO2(iso: String): String {
+        if (iso.length != 2 || iso[0] < 'A' || iso[0] > 'Z' || iso[1] < 'A' || iso[1] > 'Z') return ""
+        if (iso == "FT") return "\uD83C\uDFF4\u200D\u2620\uFE0F"
+        val sb = StringBuilder()
+        sb.append('\uD83C').append((iso[0].code - 'A'.code + 0xDDE6).toChar())
+        sb.append('\uD83C').append((iso[1].code - 'A'.code + 0xDDE6).toChar())
+        return sb.toString()
+    }
+
     private fun I(name: String, iso2: String, alt: String, codes: List<CallingCodeInfo>, hidden: Boolean) =
         CountryInfo(name, iso2, alt, codes, hidden)
 
@@ -574,4 +585,21 @@ fun FormatPhone(input: String): String {
     if (input[0] == '0') return input
     val phone = input.replace(" ", "")
     return Countries.format(if (phone.isNotEmpty() && phone[0] == '+') phone.substring(1) else phone)
+}
+
+/** QString::number(double): format 'g' with precision 6. */
+fun QNumber(value: Double): String {
+    if (value == 0.0) return "0"
+    if (value.isNaN()) return "nan"
+    if (value.isInfinite()) return if (value > 0) "inf" else "-inf"
+    val bd = java.math.BigDecimal(value).round(java.math.MathContext(6, java.math.RoundingMode.HALF_EVEN))
+    val exponent = bd.precision() - bd.scale() - 1
+    return if (exponent < -4 || exponent >= 6) {
+        val digits = bd.unscaledValue().abs().toString().trimEnd('0').ifEmpty { "0" }
+        val mantissa = if (digits.length > 1) digits[0] + "." + digits.substring(1) else digits
+        (if (bd.signum() < 0) "-" else "") + mantissa + "e" + (if (exponent < 0) "-" else "+") +
+            String.format(java.util.Locale.ROOT, "%02d", Math.abs(exponent))
+    } else {
+        bd.stripTrailingZeros().toPlainString()
+    }
 }
