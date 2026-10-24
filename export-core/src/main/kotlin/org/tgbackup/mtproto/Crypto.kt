@@ -141,7 +141,7 @@ internal class RsaKey(val n: BigInteger, val e: BigInteger) {
         /** Parses a PKCS#1 "BEGIN RSA PUBLIC KEY" PEM. */
         fun fromPem(pem: String): RsaKey {
             val b64 = pem.lines().filter { !it.startsWith("-----") }.joinToString("").trim()
-            val der = java.util.Base64.getDecoder().decode(b64)
+            val der = B64.decode(b64)
             var p = 0
             fun readLen(): Int {
                 var l = der[p++].toInt() and 0xff

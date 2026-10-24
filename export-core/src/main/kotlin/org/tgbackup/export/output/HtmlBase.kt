@@ -649,7 +649,13 @@ internal fun IsAsciiWord(value: String, minimumLength: Int, maximumLength: Int):
 }
 
 internal fun IsUnicodeHashtagWord(value: String): Boolean {
-    val characters = value.codePoints().toArray()
+    val characters = ArrayList<Int>()
+    var ci = 0
+    while (ci < value.length) {
+        val cp = value.codePointAt(ci)
+        characters.add(cp)
+        ci += Character.charCount(cp)
+    }
     if (characters.size < kRichHashtagMinLength || characters.size > kRichHashtagMaxLength) return false
     var allDecimalDigits = true
     for (cp in characters) {
@@ -721,11 +727,10 @@ internal fun SafeRelativeEmojiHref(path: String, relativeBase: String): String? 
 internal fun AnchorToken(name: String): String {
     if (name.isEmpty()) return "empty"
     val bytes = name.toByteArray(Charsets.UTF_8)
-    val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
-    if (bytes.size <= kRichAnchorDirectBytes) return encoder.encodeToString(bytes)
+    if (bytes.size <= kRichAnchorDirectBytes) return org.tgbackup.mtproto.B64.urlNoPad(bytes)
     val hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
     val hex = hash.joinToString("") { "%02x".format(it) }.substring(0, 16)
-    return encoder.encodeToString(bytes.copyOfRange(0, kRichAnchorPrefixBytes)) + '-' + hex
+    return org.tgbackup.mtproto.B64.urlNoPad(bytes.copyOfRange(0, kRichAnchorPrefixBytes)) + '-' + hex
 }
 
 /** QUrl::toPercentEncoding. */

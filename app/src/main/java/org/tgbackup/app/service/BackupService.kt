@@ -18,7 +18,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.tgbackup.app.App
 import org.tgbackup.app.R
@@ -28,6 +32,7 @@ import org.tgbackup.app.ui.MainActivity
  * Foreground service that keeps the process (and the TDLib clients inside it) alive
  * while jobs run, with the screen off or the app in the background.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class BackupService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -39,6 +44,7 @@ class BackupService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_ALL) {
             App.instance.jobs.stopAll()
+            App.instance.exports.stop()
         }
         goForeground("מתחיל…")
         if (!started) {
@@ -53,23 +59,44 @@ class BackupService : Service() {
 
     private fun observe() {
         val jobs = App.instance.jobs
+        val exports = App.instance.exports
         scope.launch {
-            combine(jobs.statuses, App.instance.store.config) { statuses, cfg ->
+            combine(jobs.statuses, App.instance.store.config, exportProgress()) { statuses, cfg, export ->
                 val active = statuses.filterValues { it.running }
-                if (active.isEmpty()) return@combine null
+                if (active.isEmpty() && export == null) return@combine null
+                if (active.isEmpty()) return@combine export
                 val copied = active.values.sumOf { it.copied }
                 val names = active.keys.mapNotNull { id -> cfg.jobs.firstOrNull { it.id == id }?.name?.ifBlank { null } }
-                val head = "${active.size} משימות פעילות · הועתקו $copied"
+                val head = "${active.size} משימות פעילות · הועתקו $copied" + if (export != null) " · ${export.first}" else ""
                 val detail = active.values.firstOrNull()?.phase.orEmpty()
                 head to (if (names.isNotEmpty()) names.joinToString() + " — " else "") + detail
             }.collect { info ->
                 if (info == null) {
                     // Give a restarting job a moment before deciding nothing runs anymore.
                     delay(3_000)
-                    if (!jobs.anyRunning.value) stopEverything()
+                    if (!jobs.anyRunning.value && !exports.isActive()) stopEverything()
                 } else {
                     notifyStatus(info.first, info.second)
                 }
+            }
+        }
+    }
+
+    /** The running export as (title, detail), or null. */
+    private fun exportProgress() = App.instance.exports.running.flatMapLatest { running ->
+        if (running == null) {
+            flowOf(null)
+        } else {
+            running.controller.state.map { state ->
+                if (!running.job.isActive) return@map null
+                val detail = when (state) {
+                    is org.tgbackup.export.ExportState.Processing -> {
+                        val s = state.state
+                        if (s.itemCount > 0) "${s.itemIndex} / ${s.itemCount} הודעות" else "מאתחל…"
+                    }
+                    else -> ""
+                }
+                "ייצוא: ${running.title}" to detail
             }
         }
     }

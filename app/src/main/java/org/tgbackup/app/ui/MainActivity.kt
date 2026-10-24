@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlaylistPlay
@@ -86,6 +87,7 @@ private fun AppRoot() {
                     bottomBar = {
                         NavigationBar {
                             Tab(tab == 0, "משימות", Icons.Filled.PlaylistPlay) { tab = 0 }
+                            Tab(tab == 4, "ייצוא", Icons.Filled.Archive) { tab = 4 }
                             Tab(tab == 1, "חשבונות", Icons.Filled.Person) { tab = 1 }
                             Tab(tab == 2, "לוג", Icons.Filled.Terminal) { tab = 2 }
                             Tab(tab == 3, "הגדרות", Icons.Filled.Info) { tab = 3 }
@@ -97,6 +99,7 @@ private fun AppRoot() {
                             0 -> JobsScreen()
                             1 -> AccountsScreen()
                             2 -> LogScreen()
+                            4 -> ExportScreen()
                             else -> SettingsScreen()
                         }
                     }

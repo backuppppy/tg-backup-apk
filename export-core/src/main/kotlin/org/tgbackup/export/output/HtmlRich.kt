@@ -70,7 +70,7 @@ private fun RichButtonAttributes(action: InlineButtonAction, style: RichButtonSt
         InlineButtonAction.Type.Callback, InlineButtonAction.Type.CallbackWithPassword -> {
             result.emplace(
                 "data-callback-data-base64",
-                java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(action.callbackData),
+                org.tgbackup.mtproto.B64.urlNoPad(action.callbackData),
             )
             result.emplace("data-button-requires-password", RichBoolAttribute(action.requiresPassword))
         }

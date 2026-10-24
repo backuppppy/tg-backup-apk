@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import org.tgbackup.app.data.Store
 import org.tgbackup.app.engine.JobManager
 import org.tgbackup.app.engine.LogBus
+import org.tgbackup.app.export.ExportManager
 import org.tgbackup.app.service.BackupService
 import org.tgbackup.app.tg.AccountManager
 
@@ -26,6 +27,8 @@ class App : Application() {
     lateinit var accounts: AccountManager
         private set
     lateinit var jobs: JobManager
+        private set
+    lateinit var exports: ExportManager
         private set
 
     override fun onCreate() {
@@ -41,6 +44,7 @@ class App : Application() {
         store = Store(filesDir)
         accounts = AccountManager(filesDir, log)
         jobs = JobManager(store, accounts, log, scope)
+        exports = ExportManager(filesDir, accounts, log)
         if (store.migratedFromLegacy) {
             log.info("ההגדרות יובאו מהגרסה הקודמת. יש להתחבר מחדש לכל חשבון (פעם אחת).")
         }

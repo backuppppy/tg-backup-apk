@@ -297,7 +297,7 @@ private fun RichTextTypeToString(type: RichText.Type): String = when (type) {
 }
 
 private fun Base64Url(data: ByteArray): String =
-    java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(data)
+    org.tgbackup.mtproto.B64.urlNoPad(data)
 
 private fun SerializeRichButtonAction(context: Ctx, action: InlineButtonAction): String {
     val values: Values = mutableListOf("type" to SerializeString(InlineButtonActionTypeToString(action)))
