@@ -5,14 +5,36 @@
 
 package org.tgbackup.export.data
 
-import java.time.Instant
-import java.time.ZoneId
-import java.time.ZonedDateTime
+import java.util.Calendar
+import java.util.TimeZone
 
 /** Time zone used for dates in the export (Desktop uses the system one). */
 object ExportTimeZone {
     @Volatile
-    var zone: ZoneId = ZoneId.systemDefault()
+    var zone: TimeZone = TimeZone.getDefault()
+}
+
+/** Local date/time parts of a unixtime (QDateTime::fromSecsSinceEpoch in local time). */
+class LocalParts(val year: Int, val month: Int, val day: Int, val hour: Int, val minute: Int, val second: Int, val standardOffset: Int) {
+    fun sameDay(other: LocalParts) = year == other.year && month == other.month && day == other.day
+
+    companion object {
+        fun of(date: TimeId): LocalParts {
+            val c = Calendar.getInstance(ExportTimeZone.zone)
+            c.timeInMillis = date.toLong() * 1000
+            return LocalParts(
+                c.get(Calendar.YEAR),
+                c.get(Calendar.MONTH) + 1,
+                c.get(Calendar.DAY_OF_MONTH),
+                c.get(Calendar.HOUR_OF_DAY),
+                c.get(Calendar.MINUTE),
+                c.get(Calendar.SECOND),
+                c.get(Calendar.ZONE_OFFSET) / 1000,
+            )
+        }
+
+        fun today(): LocalParts = of((System.currentTimeMillis() / 1000).toInt())
+    }
 }
 
 fun FormatDateTime(
@@ -23,17 +45,17 @@ fun FormatDateTime(
     separator: Char = ' ',
 ): String {
     if (date == 0) return ""
-    val value = ZonedDateTime.ofInstant(Instant.ofEpochSecond(date.toLong()), ExportTimeZone.zone)
+    val value = LocalParts.of(date)
     val timeZoneOffset = if (hasTimeZone) separator + StandardOffsetName(value) else ""
     fun two(v: Int) = if (v < 10) "0$v" else v.toString()
-    return two(value.dayOfMonth) + dateSeparator + two(value.monthValue) + dateSeparator + value.year +
+    return two(value.day) + dateSeparator + two(value.month) + dateSeparator + value.year +
         separator + two(value.hour) + timeSeparator + two(value.minute) + timeSeparator + two(value.second) +
         timeZoneOffset
 }
 
 /** QTimeZone::displayName(StandardTime, OffsetName): "UTC+03:00" ("UTC" for zero). */
-private fun StandardOffsetName(value: ZonedDateTime): String {
-    val seconds = value.zone.rules.getStandardOffset(value.toInstant()).totalSeconds
+private fun StandardOffsetName(value: LocalParts): String {
+    val seconds = value.standardOffset
     if (seconds == 0) return "UTC"
     val sign = if (seconds < 0) '-' else '+'
     val abs = Math.abs(seconds)

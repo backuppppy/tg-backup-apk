@@ -7,8 +7,6 @@ import org.tgbackup.export.Environment
 import org.tgbackup.export.Settings
 import org.tgbackup.export.data.*
 import org.tgbackup.export.data.File.SkipReason as SR
-import java.time.Instant
-import java.time.ZonedDateTime
 
 internal class JsonContext {
     // true = object, false = array.
@@ -51,8 +49,8 @@ internal fun SerializeString(value: String): String {
 
 /** QDateTime::fromSecsSinceEpoch(date).toString(Qt::ISODate) in local time. */
 internal fun SerializeDate(date: TimeId): String {
-    val v = ZonedDateTime.ofInstant(Instant.ofEpochSecond(date.toLong()), ExportTimeZone.zone)
-    return SerializeString(String.format(java.util.Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d", v.year, v.monthValue, v.dayOfMonth, v.hour, v.minute, v.second))
+    val v = LocalParts.of(date)
+    return SerializeString(String.format(java.util.Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d", v.year, v.month, v.day, v.hour, v.minute, v.second))
 }
 
 internal fun SerializeDateRaw(date: TimeId): String = SerializeString(date.toString())

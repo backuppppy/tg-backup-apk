@@ -971,3 +971,8 @@ class MessagesSlice {
     var list: MutableList<Message> = ArrayList()
     var peers: java.util.TreeMap<PeerId, Peer> = java.util.TreeMap()
 }
+
+/** std::map::emplace (Map.putIfAbsent needs Android API 24). */
+fun <K, V> MutableMap<K, V>.putIfMissing(key: K, value: V) {
+    if (!containsKey(key)) put(key, value)
+}

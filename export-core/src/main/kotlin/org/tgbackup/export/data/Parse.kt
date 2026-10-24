@@ -1291,7 +1291,7 @@ fun ParseUsersList(data: List<MTPUser>): java.util.TreeMap<Long, User> {
     val result = java.util.TreeMap<Long, User>()
     for (user in data) {
         val parsed = ParseUser(user)
-        result.putIfAbsent(parsed.info.userId, parsed)
+        result.putIfMissing(parsed.info.userId, parsed)
     }
     return result
 }
@@ -1354,11 +1354,11 @@ fun ParsePeersLists(users: List<MTPUser>, chats: List<MTPChat>): java.util.TreeM
     val result = java.util.TreeMap<PeerId, Peer>()
     for (user in users) {
         val parsed = ParseUser(user)
-        result.putIfAbsent(Peer_.fromUser(parsed.info.userId), Peer(parsed))
+        result.putIfMissing(Peer_.fromUser(parsed.info.userId), Peer(parsed))
     }
     for (chat in chats) {
         val parsed = ParseChat(chat)
-        result.putIfAbsent(parsed.id(), Peer(parsed))
+        result.putIfMissing(parsed.id(), Peer(parsed))
     }
     for ((_, parsed) in result) {
         val chat = parsed.chat() ?: continue
@@ -1740,7 +1740,7 @@ fun ParseMessagesList(selfId: PeerId, data: List<MTPMessage>, mediaFolder: Strin
     val result = java.util.TreeMap<MessageId, Message>()
     for (message in data) {
         val parsed = ParseMessage(context, message, mediaFolder)
-        result.putIfAbsent(MessageId(Peer_.toChannel(parsed.peerId), parsed.id), parsed)
+        result.putIfMissing(MessageId(Peer_.toChannel(parsed.peerId), parsed.id), parsed)
     }
     return result
 }

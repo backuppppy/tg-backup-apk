@@ -6,8 +6,6 @@ package org.tgbackup.export.output
 
 import org.tgbackup.export.data.*
 import org.tgbackup.export.data.File.SkipReason as SR
-import java.time.Instant
-import java.time.ZonedDateTime
 import java.util.TreeMap
 
 internal const val kMessagesInFile = 1000
@@ -37,12 +35,12 @@ internal typealias Attrs = TreeMap<String, String>
 
 internal fun attrs(vararg pairs: Pair<String, String>): Attrs = Attrs().also { m ->
     // std::map initializer lists keep the first of duplicate keys.
-    for ((k, v) in pairs) m.putIfAbsent(k, v)
+    for ((k, v) in pairs) m.putIfMissing(k, v)
 }
 
 /** std::map::emplace: does nothing if the key exists. */
 internal fun Attrs.emplace(key: String, value: String) {
-    putIfAbsent(key, value)
+    putIfMissing(key, value)
 }
 
 internal fun IsGlobalLink(link: String): Boolean =
@@ -266,17 +264,16 @@ internal fun FormatText(data: List<TextPart>, internalLinksDomain: String, relat
 
 internal fun FormatUsernameHtml(username: String): String = if (username.isEmpty()) username else "@$username"
 
-private fun localDate(date: TimeId): ZonedDateTime =
-    ZonedDateTime.ofInstant(Instant.ofEpochSecond(date.toLong()), ExportTimeZone.zone)
+private fun localDate(date: TimeId): LocalParts = LocalParts.of(date)
 
 internal fun DisplayDate(date: TimeId, previousDate: TimeId): Boolean {
     if (previousDate == 0) return true
-    return localDate(date).toLocalDate() != localDate(previousDate).toLocalDate()
+    return !localDate(date).sameDay(localDate(previousDate))
 }
 
 internal fun FormatDateText(date: TimeId): String {
     val parsed = localDate(date)
-    val month = when (parsed.monthValue) {
+    val month = when (parsed.month) {
         1 -> "January"
         2 -> "February"
         3 -> "March"
@@ -291,7 +288,7 @@ internal fun FormatDateText(date: TimeId): String {
         12 -> "December"
         else -> "Unknown"
     }
-    return NumberToString(parsed.dayOfMonth) + ' ' + month + ' ' + NumberToString(parsed.year)
+    return NumberToString(parsed.day) + ' ' + month + ' ' + NumberToString(parsed.year)
 }
 
 internal fun FormatTimeText(date: TimeId): String {
@@ -302,7 +299,7 @@ internal fun FormatTimeText(date: TimeId): String {
 /** QDateTime::fromSecsSinceEpoch(date).toString(Qt::ISODate) in local time. */
 internal fun IsoDate(date: TimeId): String {
     val v = localDate(date)
-    return String.format(java.util.Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d", v.year, v.monthValue, v.dayOfMonth, v.hour, v.minute, v.second)
+    return String.format(java.util.Locale.ROOT, "%04d-%02d-%02dT%02d:%02d:%02d", v.year, v.month, v.day, v.hour, v.minute, v.second)
 }
 
 internal class UserpicData {

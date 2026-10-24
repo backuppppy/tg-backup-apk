@@ -21,7 +21,7 @@ class WriterSmokeTest {
 
     @Test
     fun writesSingleChat() {
-        ExportTimeZone.zone = java.time.ZoneId.of("Asia/Jerusalem")
+        ExportTimeZone.zone = java.util.TimeZone.getTimeZone("Asia/Jerusalem")
         val dir = kotlin.io.path.createTempDirectory().toFile()
         val settings = Settings()
         settings.path = dir.absolutePath + "/"

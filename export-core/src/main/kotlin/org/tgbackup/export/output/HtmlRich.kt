@@ -684,14 +684,14 @@ internal class RichHtmlRenderer(
         val occurrence = (anchorOccurrences[base] ?: 0) + 1
         anchorOccurrences[base] = occurrence
         val result = base + if (occurrence > 1) "-" + NumberToString(occurrence) else ""
-        firstAnchorIds.putIfAbsent(name, result)
+        firstAnchorIds.putIfMissing(name, result)
         return result
     }
 
     private fun collectTextAnchors(text: RichText) {
         when (text.type) {
             RichText.Type.Anchor -> {
-                textAnchorIds.putIfAbsent(text, registerAnchor(text.data))
+                textAnchorIds.putIfMissing(text, registerAnchor(text.data))
                 collectTextAnchors(text.children)
             }
             RichText.Type.Diff -> {
@@ -723,7 +723,7 @@ internal class RichHtmlRenderer(
             RichBlock.Kind.Heading, RichBlock.Kind.Paragraph, RichBlock.Kind.Footer, RichBlock.Kind.Thinking,
             RichBlock.Kind.AuthorDate, RichBlock.Kind.Code,
             -> collectTextAnchors(block.text)
-            RichBlock.Kind.Anchor -> blockAnchorIds.putIfAbsent(block, registerAnchor(block.name))
+            RichBlock.Kind.Anchor -> blockAnchorIds.putIfMissing(block, registerAnchor(block.name))
             RichBlock.Kind.List -> for (item in block.listItems) {
                 when (item.content) {
                     RichListItemContent.Text -> item.text?.let { collectTextAnchors(it) }

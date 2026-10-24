@@ -36,7 +36,6 @@ import org.tgbackup.mtproto.MtpClient
 import org.tgbackup.mtproto.MtpLogin
 import org.tgbackup.mtproto.MtpStorage
 import java.io.File
-import java.time.ZoneId
 
 /** The export options remembered between exports (Desktop's ExportSettings). */
 @Serializable
@@ -186,7 +185,7 @@ class ExportManager(
     }
 
     private suspend fun runExport(account: Account, c: MtpClient, controller: Controller, settings: Settings, title: String) {
-        ExportTimeZone.zone = ZoneId.systemDefault()
+        ExportTimeZone.zone = java.util.TimeZone.getDefault()
         val environment = Environment()
         environment.aboutTelegram = "Here is the data you requested. Remember: Telegram is ad free, it doesn't use your data for ad targeting and doesn't sell it to others. Telegram only keeps the information it needs to function as a secure and feature-rich cloud service.\n\nCheck out Settings > Privacy & Security on Telegram's mobile apps for the relevant settings."
         environment.aboutChats = "This page lists all chats from this export."

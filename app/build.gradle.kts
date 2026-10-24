@@ -51,8 +51,6 @@ android {
     }
 
     compileOptions {
-        // java.time is used by the export engine; minSdk stays 23.
-        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -73,7 +71,6 @@ kotlin {
 dependencies {
     implementation("dev.g000sha256:tdl-coroutines:15.0.0")
     implementation("org.tgbackup:export-core:1.0")
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     implementation("io.sentry:sentry-android:8.61.0")
 
     implementation("androidx.core:core-ktx:1.17.0")

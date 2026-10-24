@@ -654,7 +654,7 @@ class ApiWrap(private val client: MtpClient, private val log: (String) -> Unit =
                 val relativePath = if (process is TopicProcess) process.relativePath else (process as ChatProcess).info.relativePath
                 for (entry in result) {
                     val document = ParseDocument(process.context, entry, relativePath, 0)
-                    resolvedCustomEmoji.putIfAbsent(document.id, document)
+                    resolvedCustomEmoji.putIfMissing(document.id, document)
                 }
             } catch (e: RpcError) {
                 log("Export Error: Failed to get documents for emoji.")

@@ -66,13 +66,11 @@ import org.tgbackup.export.ProcessingState
 import org.tgbackup.export.TopicEntry
 import org.tgbackup.export.data.DialogInfo
 import org.tgbackup.export.data.FormatSizeText
-import java.time.Instant
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.LocalTime
-import java.time.ZoneId
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 private const val kMegabyte = 1024L * 1024
 private const val kSizeValueCount = 100
@@ -97,6 +95,15 @@ private fun IndexBySizeLimit(limit: Long): Int {
     for (i in 0 until kSizeValueCount) if (SizeLimitByIndex(i) >= limit) return i
     return kSizeValueCount - 1
 }
+
+private fun formatTime(t: Int, pattern: String): String =
+    SimpleDateFormat(pattern, Locale.getDefault()).format(Date(t.toLong() * 1000))
+
+private fun localCalendar(t: Int): Calendar = Calendar.getInstance().apply { timeInMillis = t.toLong() * 1000 }
+
+/** Local midnight of the given local date. */
+private fun localDayStart(year: Int, month: Int, day: Int): Int =
+    (Calendar.getInstance().apply { clear(); set(year, month, day, 0, 0, 0) }.timeInMillis / 1000).toInt()
 
 private fun DialogInfo.Type.label(): String = when (this) {
     DialogInfo.Type.Self -> "הודעות שמורות"
@@ -317,8 +324,7 @@ private fun SessionCard(account: Account, loggedIn: Boolean?, busy: String?, ava
             }
             val now = (System.currentTimeMillis() / 1000).toInt()
             if (availableAt > now) {
-                val whenText = LocalDateTime.ofInstant(Instant.ofEpochSecond(availableAt.toLong()), ZoneId.systemDefault())
-                    .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+                val whenText = formatTime(availableAt, "dd.MM.yyyy HH:mm")
                 Text(
                     "⏳ מטעמי אבטחה טלגרם יאפשר להתחיל את הייצוא רק בעוד ${(availableAt - now) / 3600} שעות (ב-$whenText). " +
                         "נשלחה הודעה לכל המכשירים שלך. חזור אז ונסה שוב מאותו מכשיר.",
@@ -430,16 +436,14 @@ private fun ExportOptions(
             )
             HorizontalDivider()
 
-            val fmtDate = DateTimeFormatter.ofPattern("d MMMM yyyy")
-            val fmtTime = DateTimeFormatter.ofPattern("HH:mm")
-            fun local(t: Int) = LocalDateTime.ofInstant(Instant.ofEpochSecond(t.toLong()), ZoneId.systemDefault())
-            Text("From: " + (if (from != 0) local(from).format(fmtDate) + ", " + local(from).format(fmtTime) else "the oldest message"))
+            fun shown(t: Int) = formatTime(t, "d MMMM yyyy") + ", " + formatTime(t, "HH:mm")
+            Text("From: " + (if (from != 0) shown(from) else "the oldest message"))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = { picking = "from" }) { Text("תאריך") }
                 if (from != 0) OutlinedButton(onClick = { picking = "fromTime" }) { Text("שעה") }
                 if (from != 0) TextButton(onClick = { onFrom(0) }) { Text("Reset") }
             }
-            Text("To: " + (if (till != 0) local(till).format(fmtDate) + ", " + local(till).format(fmtTime) else "present"))
+            Text("To: " + (if (till != 0) shown(till) else "present"))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = { picking = "till" }) { Text("תאריך") }
                 if (till != 0) OutlinedButton(onClick = { picking = "tillTime" }) { Text("שעה") }
@@ -462,18 +466,20 @@ private fun ExportOptions(
         "from", "till" -> {
             val isFrom = picking == "from"
             val current = if (isFrom) from else till
-            val initial = if (current != 0) {
-                LocalDateTime.ofInstant(Instant.ofEpochSecond(current.toLong()), ZoneId.systemDefault()).toLocalDate()
-            } else LocalDate.now()
-            val state = rememberDatePickerState(initialSelectedDateMillis = initial.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+            val initial = localCalendar(if (current != 0) current else (System.currentTimeMillis() / 1000).toInt())
+            val utcMillis = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                clear()
+                set(initial.get(Calendar.YEAR), initial.get(Calendar.MONTH), initial.get(Calendar.DAY_OF_MONTH), 0, 0, 0)
+            }.timeInMillis
+            val state = rememberDatePickerState(initialSelectedDateMillis = utcMillis)
             DatePickerDialog(
                 onDismissRequest = { picking = null },
                 confirmButton = {
                     TextButton(onClick = {
                         val millis = state.selectedDateMillis
                         if (millis != null) {
-                            val date = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()
-                            val limit = date.atStartOfDay(ZoneId.systemDefault()).toEpochSecond().toInt()
+                            val date = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = millis }
+                            val limit = localDayStart(date.get(Calendar.YEAR), date.get(Calendar.MONTH), date.get(Calendar.DAY_OF_MONTH))
                             if (isFrom) {
                                 onFrom(limit)
                             } else {
@@ -489,8 +495,8 @@ private fun ExportOptions(
         "fromTime", "tillTime" -> {
             val isFrom = picking == "fromTime"
             val current = if (isFrom) from else till
-            val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(current.toLong()), ZoneId.systemDefault()).toLocalTime()
-            val state = rememberTimePickerState(initialHour = t.hour, initialMinute = t.minute, is24Hour = true)
+            val t = localCalendar(current)
+            val state = rememberTimePickerState(initialHour = t.get(Calendar.HOUR_OF_DAY), initialMinute = t.get(Calendar.MINUTE), is24Hour = true)
             AlertDialog(
                 onDismissRequest = { picking = null },
                 confirmButton = {
@@ -513,9 +519,10 @@ private fun ExportOptions(
 }
 
 /** base::unixtime::serialize(QDateTime(date, QTime())): local midnight of that day. */
-private fun local0(t: Int): Int =
-    LocalDateTime.ofInstant(Instant.ofEpochSecond(t.toLong()), ZoneId.systemDefault()).toLocalDate()
-        .atTime(LocalTime.MIDNIGHT).atZone(ZoneId.systemDefault()).toEpochSecond().toInt()
+private fun local0(t: Int): Int {
+    val c = localCalendar(t)
+    return localDayStart(c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH))
+}
 
 @Composable
 private fun ProgressPanel(running: RunningExport) {
@@ -560,7 +567,7 @@ private fun ProgressPanel(running: RunningExport) {
                                 val seconds = maxOf(s.type.removePrefix("TAKEOUT_INIT_DELAY_").toIntOrNull() ?: 1, 1)
                                 val hours = seconds / 3600
                                 val hoursText = if (hours <= 0) "less than an hour" else "$hours hours"
-                                val whenText = LocalDateTime.now().plusSeconds(seconds.toLong()).format(DateTimeFormatter.ofPattern("d MMMM yyyy 'at' HH:mm"))
+                                val whenText = formatTime((System.currentTimeMillis() / 1000).toInt() + seconds, "d MMMM yyyy 'at' HH:mm")
                                 "For security reasons, you will be able to begin downloading your data in $hoursText. " +
                                     "We have notified all your devices about the export request to make sure it's authorized and give you time to react if it's not.\n\n" +
                                     "Please come back on $whenText and repeat the request using the same device."

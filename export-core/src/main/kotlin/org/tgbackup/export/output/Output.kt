@@ -18,7 +18,6 @@ import org.tgbackup.export.data.UserpicsInfo
 import org.tgbackup.export.data.UserpicsSlice
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
-import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -172,8 +171,9 @@ fun NormalizePath(settings: Settings): String {
     if (!folder.exists() && !settings.forceSubPath) return result
     val list = folder.listFiles()?.filter { it.name != "." && it.name != ".." } ?: emptyList()
     if (list.isEmpty() && !settings.forceSubPath) return result
-    val date = LocalDate.now()
-    val base = (if (settings.onlySinglePeer()) "ChatExport_" else "DataExport_") + date.toString()
+    val date = org.tgbackup.export.data.LocalParts.today()
+    val iso = String.format(java.util.Locale.ROOT, "%04d-%02d-%02d", date.year, date.month, date.day)
+    val base = (if (settings.onlySinglePeer()) "ChatExport_" else "DataExport_") + iso
     fun add(i: Int) = base + if (i != 0) " ($i)" else ""
     var index = 0
     while (java.io.File(result + add(index)).exists()) ++index
