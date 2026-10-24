@@ -30,13 +30,21 @@ data class JobStatus(
     val isProtected: Boolean = false,
     val copied: Int = 0,
     val failed: Int = 0,
+    /** Last message delivered to the target in this run (server id). */
+    val targetChatId: Long = 0,
+    val lastTargetId: Long = 0,
 ) {
-    val lastLink: String?
-        get() {
-            if (lastId <= 0 || sourceChatId == 0L) return null
-            val internal = if (sourceChatId <= -1_000_000_000_000L) -sourceChatId - 1_000_000_000_000L else return null
-            return "https://t.me/c/$internal/$lastId"
-        }
+    /** The last handled message in the source. */
+    val lastLink: String? get() = messageLink(sourceChatId, lastId)
+
+    /** The last message copied into the target. */
+    val lastTargetLink: String? get() = messageLink(targetChatId, lastTargetId)
+
+    private fun messageLink(chatId: Long, messageId: Long): String? {
+        if (messageId <= 0 || chatId == 0L) return null
+        val internal = if (chatId <= -1_000_000_000_000L) -chatId - 1_000_000_000_000L else return null
+        return "https://t.me/c/$internal/$messageId"
+    }
 }
 
 class JobManager(
@@ -131,6 +139,8 @@ class JobManager(
         override fun phase(text: String) = setStatus(jobId) { it.copy(phase = text) }
         override fun position(lastId: Long) = setStatus(jobId) { it.copy(lastId = lastId) }
         override fun copied() = setStatus(jobId) { it.copy(copied = it.copied + 1) }
+        override fun delivered(chatId: Long, serverId: Long) =
+            setStatus(jobId) { it.copy(targetChatId = chatId, lastTargetId = serverId) }
         override fun failed() = setStatus(jobId) { it.copy(failed = it.failed + 1) }
         override fun sourceInfo(chatId: Long, title: String, isProtected: Boolean) =
             setStatus(jobId) { it.copy(sourceChatId = chatId, sourceTitle = title, isProtected = isProtected) }

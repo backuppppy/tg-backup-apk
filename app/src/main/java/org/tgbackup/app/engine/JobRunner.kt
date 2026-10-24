@@ -58,6 +58,9 @@ interface JobReporter {
     fun phase(text: String)
     fun position(lastId: Long)
     fun copied()
+
+    /** A message was sent to [chatId]; [serverId] is its id as shown in t.me links. */
+    fun delivered(chatId: Long, serverId: Long)
     fun failed()
     fun sourceInfo(chatId: Long, title: String, isProtected: Boolean)
 }
@@ -355,6 +358,7 @@ class JobRunner(
                 when (val r = sender.sendAndWait(target, content)) {
                     is SendOutcome.Sent -> {
                         report.copied()
+                        report.delivered(target, r.messageId.serverId())
                         log.success("[$who] הועתקה הודעה $sid")
                         if (!protected) delay(Random.nextLong(1_400, 3_800))
                         return true

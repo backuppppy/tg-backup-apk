@@ -169,7 +169,18 @@ private fun JobCard(
             )
             if (status.isProtected) Text("🔒 ערוץ מוגן — הורדה והעלאה מחדש", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
-            if (running) Text(status.phase, color = MaterialTheme.colorScheme.primary)
+            if (running) {
+                // Tapping the phase opens the last message copied into the target.
+                val targetLink = status.lastTargetLink
+                Text(
+                    status.phase,
+                    color = MaterialTheme.colorScheme.primary,
+                    textDecoration = if (targetLink != null) TextDecoration.Underline else null,
+                    modifier = if (targetLink != null) Modifier.clickable {
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetLink))) }
+                    } else Modifier,
+                )
+            }
             Text("הועתקו בהרצה זו: ${status.copied}" + if (status.failed > 0) " · נכשלו: ${status.failed}" else "")
             if (status.lastId > 0) {
                 val link = status.lastLink
