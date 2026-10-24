@@ -268,3 +268,13 @@ class TlRaw(private val bytes: ByteArray) : TlObject {
     override fun serializeBody(w: TlWriter) = w.raw(bytes.copyOfRange(4, bytes.size))
     override fun serialize(w: TlWriter) = w.raw(bytes)
 }
+
+class InvokeWithMessagesRange<R>(val range: MTPMessageRange, val query: TlFunction<R>) : TlFunction<R> {
+    override val constructorId: Int get() = 0x365275f2
+    override fun serializeBody(w: TlWriter) {
+        range.serialize(w)
+        query.serialize(w)
+    }
+
+    override fun parseResult(r: TlReader): R = query.parseResult(r)
+}
