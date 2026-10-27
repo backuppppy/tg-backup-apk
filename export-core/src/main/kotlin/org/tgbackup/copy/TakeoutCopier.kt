@@ -139,38 +139,27 @@ class TakeoutCopier(
 
     /** Up to [limit] messages with id > [afterId], oldest first, read through the takeout session. */
     suspend fun historyAfter(peer: CopyPeer, afterId: Int, limit: Int = 100): List<MTPMessage> {
+        val fn = MTPmessages_GetHistory(
+            vpeer = peer.input,
+            voffset_id = afterId + 1,
+            voffset_date = 0,
+            vadd_offset = -limit,
+            vlimit = limit,
+            vmax_id = 0,
+            vmin_id = afterId,
+            vhash = 0,
+        )
         val r = if (afterId == 0) {
-            // In a takeout session, the standard trick (offset_id=1, add_offset=-limit) returns
-            // the NEWEST messages instead of the OLDEST. Fix: get the latest ID first, then use
-            // it as add_offset to position the cursor past the entire history so Telegram returns
-            // the oldest batch (it clamps the excess offset to the actual message count).
-            val latest = latestId(peer)
-            if (latest == 0) return emptyList()
-            takeout(
-                MTPmessages_GetHistory(
-                    vpeer = peer.input,
-                    voffset_id = 0,
-                    voffset_date = 0,
-                    vadd_offset = latest + limit,
-                    vlimit = limit,
-                    vmax_id = 0,
-                    vmin_id = 0,
-                    vhash = 0,
-                ),
-            )
+            // In a takeout session (InvokeWithTakeout), the standard trick
+            // (offset_id=1, add_offset=-limit) incorrectly returns the NEWEST messages.
+            // For the initial read we only need message metadata, not takeout file references
+            // (send() already refreshes stale file references via reload()). Use a plain
+            // client call here; it returns the oldest messages correctly, just like a
+            // normal Telegram client session.
+            begin()
+            client.invoke(fn)
         } else {
-            takeout(
-                MTPmessages_GetHistory(
-                    vpeer = peer.input,
-                    voffset_id = afterId + 1,
-                    voffset_date = 0,
-                    vadd_offset = -limit,
-                    vlimit = limit,
-                    vmax_id = 0,
-                    vmin_id = afterId,
-                    vhash = 0,
-                ),
-            )
+            takeout(fn)
         }
         return messagesOf(r).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
     }
