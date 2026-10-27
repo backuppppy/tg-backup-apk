@@ -115,7 +115,7 @@ class JobManager(
                         if (current.viaTakeout) {
                             TakeoutJobRunner(
                                 job = current,
-                                account = clients[0],
+                                accounts = clients,
                                 exports = exports(),
                                 store = store,
                                 log = log,

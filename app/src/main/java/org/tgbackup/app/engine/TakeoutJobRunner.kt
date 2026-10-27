@@ -5,12 +5,16 @@ import io.sentry.SentryLevel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.tgbackup.app.data.Job
+import org.tgbackup.app.data.JobMode
 import org.tgbackup.app.data.MediaType
 import org.tgbackup.app.data.Progress
 import org.tgbackup.app.data.Store
@@ -44,15 +48,16 @@ fun CopyKind.matches(type: MediaType): Boolean {
 /**
  * Copies without downloading: reads the source through the account's export (takeout)
  * session and sends every file by reference. Works for protected and restricted
- * channels too. Uses only the job's first account; progress is shared with [JobRunner].
+ * channels too. Supports multiple accounts in FAST mode; ORDERED mode uses the first
+ * account only. Progress is shared with [JobRunner].
  *
  * Telegram still refuses some files of protected channels (CHAT_FORWARDS_RESTRICTED —
- * seen for files that came into the channel from elsewhere), whether or not they were
- * read through takeout. Those messages fall back to TDLib download + upload, like [JobRunner].
+ * seen for files that came into the channel from elsewhere). Those messages fall back
+ * to TDLib download + upload using the corresponding account, like [JobRunner].
  */
 class TakeoutJobRunner(
     private val job: Job,
-    private val account: AccountClient,
+    private val accounts: List<AccountClient>,
     private val exports: ExportManager,
     private val store: Store,
     private val log: LogBus,
@@ -61,45 +66,66 @@ class TakeoutJobRunner(
     private val clearStartFrom: () -> Unit,
 ) {
     private val tag = job.name.ifBlank { job.id }
-    private val limiter = RateLimiter(job.perMinuteLimit)
+    private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
     private var sourceChatId = 0L
+    private var targetChatId = 0L
 
-    suspend fun run() {
-        if (!account.isReady) {
-            report.phase("ממתין לחיבור החשבון ${account.tag}")
-            account.awaitReady()
+    private inner class Worker(
+        val account: AccountClient,
+        val copier: TakeoutCopier,
+        val src: CopyPeer,
+        val dst: CopyPeer,
+    )
+
+    suspend fun run() = coroutineScope {
+        for (ac in accounts) {
+            if (!ac.isReady) {
+                report.phase("ממתין לחיבור החשבון ${ac.tag}")
+                ac.awaitReady()
+            }
         }
         report.phase("מאתר ערוצים")
-        val source = account.resolveChat(job.source).getOrThrow()
-        val target = account.resolveChat(job.target).getOrThrow()
+        val source = accounts[0].resolveChat(job.source).getOrThrow()
+        val target = accounts[0].resolveChat(job.target).getOrThrow()
         report.sourceInfo(source.id, source.title, source.hasProtectedContent)
         sourceChatId = source.id
+        targetChatId = target.id
         // An opened chat keeps its loaded messages in TDLib memory, which the re-upload fallback reads.
-        account.client.openChat(source.id)
+        accounts[0].client.openChat(source.id)
 
-        report.phase("מחבר את סשן הייצוא")
-        val client = exports.copyClient(account.account).getOrElse { e ->
-            error("סשן הייצוא לא מחובר: ${e.message}")
-        }
-        val copier = TakeoutCopier(client) { log.info("[$tag] $it") }
-        try {
+        report.phase(if (accounts.size > 1) "מחבר ${accounts.size} סשני ייצוא" else "מחבר את סשן הייצוא")
+        val workers = accounts.map { ac ->
+            val client = exports.copyClient(ac.account).getOrElse { e ->
+                error("סשן הייצוא לא מחובר עבור ${ac.tag}: ${e.message}")
+            }
+            val copier = TakeoutCopier(client) { log.info("[${tag}·${ac.tag}] $it") }
             val peers = copier.resolve(listOf(bare(source.id), bare(target.id)))
-            val src = peers[bare(source.id)] ?: error("ערוץ המקור לא נמצא בסשן הייצוא")
-            val dst = peers[bare(target.id)] ?: error("ערוץ היעד לא נמצא בסשן הייצוא")
+            val src = peers[bare(source.id)] ?: error("ערוץ המקור לא נמצא בסשן הייצוא של ${ac.tag}")
+            val dst = peers[bare(target.id)] ?: error("ערוץ היעד לא נמצא בסשן הייצוא של ${ac.tag}")
+            Worker(ac, copier, src, dst)
+        }
 
+        try {
             if (job.startFromId > 0) {
                 store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1) }
                 clearStartFrom()
                 log.info("[$tag] מתחיל מהודעה ${job.startFromId}")
             }
-            log.info("[$tag] פעיל בלי הורדה (סשן ייצוא): ${src.title} → ${dst.title} | ${job.mediaType.label}")
-            loop(copier, src, dst, target.id)
+
+            val fast = job.mode == JobMode.FAST && accounts.size > 1
+            log.info(
+                "[$tag] פעיל בלי הורדה (סשן ייצוא): ${workers[0].src.title} → ${workers[0].dst.title} | " +
+                    "${job.mediaType.label} | ${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
+            )
+            if (fast) runFast(workers) else loop(workers[0])
         } finally {
-            withContext(NonCancellable) { copier.finish() }
+            withContext(NonCancellable) { workers.forEach { it.copier.finish() } }
         }
     }
 
-    private suspend fun loop(copier: TakeoutCopier, src: CopyPeer, dst: CopyPeer, targetChatId: Long) {
+    // ── Ordered mode: first account only ──────────────────────────────────────
+
+    private suspend fun loop(w: Worker) {
         var last = store.progress(job.id).lastId
         report.position(last)
         while (true) {
@@ -107,7 +133,7 @@ class TakeoutJobRunner(
             awaitNotPaused()
             report.phase("סורק הודעות אחרי $last")
             val batch = try {
-                copier.historyAfter(src, last.toInt())
+                w.copier.historyAfter(w.src, last.toInt())
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RpcError) {
@@ -138,7 +164,7 @@ class TakeoutJobRunner(
                 val id = TakeoutCopier.idOf(m)
                 if (m is MTPDmessage) {
                     val kind = TakeoutCopier.kindOf(m)
-                    if (kind.matches(job.mediaType)) deliver(copier, src, dst, targetChatId, m)
+                    if (kind.matches(job.mediaType)) deliver(w, m)
                     else log.info("[$tag] דילוג על $id (לא תואם לסינון)")
                 }
                 last = id.toLong()
@@ -148,42 +174,136 @@ class TakeoutJobRunner(
         }
     }
 
-    private suspend fun deliver(copier: TakeoutCopier, src: CopyPeer, dst: CopyPeer, targetChatId: Long, m: MTPDmessage) {
+    // ── Fast mode: each account handles its own slice ──────────────────────────
+
+    private suspend fun runFast(workers: List<Worker>) = coroutineScope {
+        val n = workers.size
+        val chunk = 25
+        while (true) {
+            coroutineContext.ensureActive()
+            awaitNotPaused()
+            var p = store.progress(job.id)
+            report.position(p.lastId)
+            if (p.waveEnd <= p.lastId) {
+                val latest = try {
+                    workers[0].copier.latestId(workers[0].src).toLong()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("[$tag] שגיאת רשת — מנסה שוב")
+                    report.phase("שגיאת רשת — מנסה שוב")
+                    delay(30_000)
+                    continue
+                }
+                if (latest <= p.lastId) {
+                    report.phase("מעודכן — ממתין להודעות חדשות")
+                    delay(60_000)
+                    continue
+                }
+                val ws = p.lastId + 1
+                val we = minOf(p.lastId + n * chunk, latest)
+                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap()) }
+                p = store.progress(job.id)
+                log.info("[$tag] סבב חדש: הודעות $ws–$we")
+            } else {
+                log.info("[$tag] ממשיך סבב קיים: ${p.waveStart}–${p.waveEnd}")
+            }
+            val wave = p
+            report.phase("סבב ${wave.waveStart}–${wave.waveEnd}")
+            (0 until n).mapNotNull { i ->
+                val rs = wave.waveStart + i * chunk
+                if (rs > wave.waveEnd) return@mapNotNull null
+                val re = minOf(rs + chunk - 1, wave.waveEnd)
+                async { rangeWorker(i, workers[i], rs, re) }
+            }.awaitAll()
+            store.saveProgress(job.id) {
+                it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap())
+            }
+            report.position(wave.waveEnd)
+        }
+    }
+
+    private suspend fun rangeWorker(i: Int, w: Worker, rs: Long, re: Long) {
+        var last = maxOf(rs - 1, store.progress(job.id).workerLast[i] ?: 0)
+        while (last < re) {
+            awaitNotPaused()
+            val batch = try {
+                w.copier.historyAfter(w.src, last.toInt())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RpcError) {
+                if (e.type.startsWith("TAKEOUT_INIT_DELAY")) {
+                    report.phase("ממתין לאישור הייצוא בטלגרם")
+                    log.warn("[$tag·${w.account.tag}] טלגרם מבקש לאשר את הייצוא — אשר בהודעת השירות")
+                    delay(60_000)
+                    continue
+                }
+                log.error("[$tag·${w.account.tag}] קריאת היסטוריה נכשלה: ${e.message}")
+                delay(15_000)
+                continue
+            } catch (e: Exception) {
+                log.error("[$tag·${w.account.tag}] קריאת היסטוריה נכשלה: ${e.message}")
+                delay(15_000)
+                continue
+            }
+            val inRange = batch.filter { TakeoutCopier.idOf(it) <= re.toInt() }
+            if (batch.isEmpty() || inRange.isEmpty()) break
+            for (m in inRange) {
+                coroutineContext.ensureActive()
+                awaitNotPaused()
+                val id = TakeoutCopier.idOf(m)
+                if (m is MTPDmessage && TakeoutCopier.kindOf(m).matches(job.mediaType)) {
+                    deliver(w, m)
+                } else if (m is MTPDmessage) {
+                    log.info("[$tag·${w.account.tag}] דילוג על $id (לא תואם לסינון)")
+                }
+                last = id.toLong()
+                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last)) }
+            }
+        }
+    }
+
+    // ── Delivery ───────────────────────────────────────────────────────────────
+
+    private suspend fun deliver(w: Worker, m: MTPDmessage) {
+        val who = if (accounts.size > 1) "$tag·${w.account.tag}" else tag
         var attempts = 0
         while (true) {
             awaitNotPaused()
-            limiter.acquire { ms -> report.phase("תקרת ${job.perMinuteLimit} הודעות לדקה — ממתין ${ms / 1000} שנ'") }
+            limiters.getValue(w.account.account.id).acquire { ms ->
+                report.phase("תקרת ${job.perMinuteLimit} הודעות לדקה — ממתין ${ms / 1000} שנ'")
+            }
             report.phase("מעתיק הודעה ${m.vid}")
             try {
-                when (val r = copier.send(src, dst, m, job.stripLinks)) {
+                when (val r = w.copier.send(w.src, w.dst, m, job.stripLinks)) {
                     is TakeoutCopier.Sent.Ok -> {
                         report.copied()
                         if (r.messageId > 0) report.delivered(targetChatId, r.messageId.toLong())
-                        log.success("[$tag] הועתקה הודעה ${m.vid} (בלי הורדה)")
+                        log.success("[$who] הועתקה הודעה ${m.vid} (בלי הורדה)")
                         delay(Random.nextLong(1_400, 3_800))
                     }
-                    is TakeoutCopier.Sent.Skipped -> log.info("[$tag] דילוג על ${m.vid} (${r.why})")
+                    is TakeoutCopier.Sent.Skipped -> log.info("[$who] דילוג על ${m.vid} (${r.why})")
                 }
                 return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RpcError) {
                 if (e.type != "CHAT_FORWARDS_RESTRICTED") {
-                    if (fail(m, "${e.code} ${e.type}", ++attempts)) return
+                    if (fail(m, who, "${e.code} ${e.type}", ++attempts)) return
                     continue
                 }
-                log.warn("[$tag] טלגרם חוסם שליחה בלי הורדה של הודעה ${m.vid} — מוריד ומעלה מחדש")
-                reupload(m.vid, targetChatId)
+                log.warn("[$who] טלגרם חוסם שליחה בלי הורדה של הודעה ${m.vid} — מוריד ומעלה מחדש")
+                reupload(w.account, m.vid)
                 return
             } catch (e: Exception) {
-                if (fail(m, e.message ?: e.javaClass.simpleName, ++attempts)) return
+                if (fail(m, who, e.message ?: e.javaClass.simpleName, ++attempts)) return
             }
         }
     }
 
     /** Logs a failed send; returns true when the message is given up on. */
-    private suspend fun fail(m: MTPDmessage, text: String, attempts: Int): Boolean {
-        log.error("[$tag] שליחת הודעה ${m.vid} נכשלה: $text")
+    private suspend fun fail(m: MTPDmessage, who: String, text: String, attempts: Int): Boolean {
+        log.error("[$who] שליחת הודעה ${m.vid} נכשלה: $text")
         if (attempts >= 3) {
             Sentry.captureMessage("Takeout send failed: $text", SentryLevel.WARNING) { s ->
                 s.setTag("job", tag)
@@ -197,7 +317,7 @@ class TakeoutJobRunner(
     }
 
     /** Downloads message [id] of the source with TDLib and uploads it to [targetChatId]. */
-    private suspend fun reupload(id: Int, targetChatId: Long) {
+    private suspend fun reupload(account: AccountClient, id: Int) {
         val msg = account.client.getMessage(sourceChatId, id.toLong() shl 20).getOrNull()
         val file = msg?.content?.mainFile()
         if (msg == null || file == null) {

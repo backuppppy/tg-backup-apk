@@ -163,7 +163,7 @@ private fun JobCard(
             }
             Text("${status.sourceTitle.ifBlank { job.source }}  ←  ${job.target}", style = MaterialTheme.typography.bodySmall)
             Text(
-                "${job.mediaType.label} · ${if (job.viaTakeout) "📡 בלי הורדה" else if (job.mode == JobMode.FAST) "מהיר" else "מסודר"} · חשבונות: " +
+                "${job.mediaType.label} · ${if (job.mode == JobMode.FAST) "מהיר" else "מסודר"}${if (job.viaTakeout) " · 📡 בלי הורדה" else ""} · חשבונות: " +
                     accNames.ifEmpty { listOf("—") }.joinToString(),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -266,13 +266,13 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                 }
                 if (viaTakeout) {
                     Text(
-                        "עובד גם בערוצים מוגנים וחסומים. משתמש בחשבון הראשון בלבד. " +
+                        "עובד גם בערוצים מוגנים וחסומים. " +
                             "בפעם הראשונה טלגרם עשוי לבקש לאשר את הייצוא בהודעת שירות.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
 
-                if (selected.size > 1 && !viaTakeout) {
+                if (selected.size > 1) {
                     Text("מצב עבודה", style = MaterialTheme.typography.labelLarge)
                     JobMode.entries.forEach { m -> RadioRow(m.label, mode == m) { mode = m } }
                 }
