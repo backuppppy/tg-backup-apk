@@ -3,6 +3,7 @@ package org.tgbackup.app.engine
 import io.sentry.Sentry
 import io.sentry.SentryLevel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -15,12 +16,16 @@ import org.tgbackup.app.data.Progress
 import org.tgbackup.app.data.Store
 import org.tgbackup.app.export.ExportManager
 import org.tgbackup.app.tg.AccountClient
+import org.tgbackup.app.tg.SendOutcome
+import org.tgbackup.app.tg.getOrNull
+import org.tgbackup.app.tg.serverId
 import org.tgbackup.copy.CopyKind
 import org.tgbackup.copy.CopyPeer
 import org.tgbackup.copy.TakeoutCopier
 import org.tgbackup.mtproto.RpcError
 import org.tgbackup.mtproto.tl.MTPDmessage
 import kotlin.coroutines.coroutineContext
+import java.io.File
 import kotlin.random.Random
 
 /** Media-type filter for messages read over MTProto (same meaning as [matches] for TDLib messages). */
@@ -40,6 +45,10 @@ fun CopyKind.matches(type: MediaType): Boolean {
  * Copies without downloading: reads the source through the account's export (takeout)
  * session and sends every file by reference. Works for protected and restricted
  * channels too. Uses only the job's first account; progress is shared with [JobRunner].
+ *
+ * Telegram still refuses some files of protected channels (CHAT_FORWARDS_RESTRICTED —
+ * seen for files that came into the channel from elsewhere), whether or not they were
+ * read through takeout. Those messages fall back to TDLib download + upload, like [JobRunner].
  */
 class TakeoutJobRunner(
     private val job: Job,
@@ -53,6 +62,7 @@ class TakeoutJobRunner(
 ) {
     private val tag = job.name.ifBlank { job.id }
     private val limiter = RateLimiter(job.perMinuteLimit)
+    private var sourceChatId = 0L
 
     suspend fun run() {
         if (!account.isReady) {
@@ -63,6 +73,9 @@ class TakeoutJobRunner(
         val source = account.resolveChat(job.source).getOrThrow()
         val target = account.resolveChat(job.target).getOrThrow()
         report.sourceInfo(source.id, source.title, source.hasProtectedContent)
+        sourceChatId = source.id
+        // An opened chat keeps its loaded messages in TDLib memory, which the re-upload fallback reads.
+        account.client.openChat(source.id)
 
         report.phase("מחבר את סשן הייצוא")
         val client = exports.copyClient(account.account).getOrElse { e ->
@@ -154,19 +167,100 @@ class TakeoutJobRunner(
                 return
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RpcError) {
+                if (e.type != "CHAT_FORWARDS_RESTRICTED") {
+                    if (fail(m, "${e.code} ${e.type}", ++attempts)) return
+                    continue
+                }
+                log.warn("[$tag] טלגרם חוסם שליחה בלי הורדה של הודעה ${m.vid} — מוריד ומעלה מחדש")
+                reupload(m.vid, targetChatId)
+                return
             } catch (e: Exception) {
-                val text = (e as? RpcError)?.let { "${it.code} ${it.type}" } ?: (e.message ?: e.javaClass.simpleName)
-                log.error("[$tag] שליחת הודעה ${m.vid} נכשלה: $text")
-                if (++attempts >= 3) {
-                    Sentry.captureMessage("Takeout send failed: $text", SentryLevel.WARNING) { s ->
-                        s.setTag("job", tag)
-                        s.setExtra("message_id", m.vid.toString())
+                if (fail(m, e.message ?: e.javaClass.simpleName, ++attempts)) return
+            }
+        }
+    }
+
+    /** Logs a failed send; returns true when the message is given up on. */
+    private suspend fun fail(m: MTPDmessage, text: String, attempts: Int): Boolean {
+        log.error("[$tag] שליחת הודעה ${m.vid} נכשלה: $text")
+        if (attempts >= 3) {
+            Sentry.captureMessage("Takeout send failed: $text", SentryLevel.WARNING) { s ->
+                s.setTag("job", tag)
+                s.setExtra("message_id", m.vid.toString())
+            }
+            report.failed()
+            return true
+        }
+        delay(3_000L * attempts)
+        return false
+    }
+
+    /** Downloads message [id] of the source with TDLib and uploads it to [targetChatId]. */
+    private suspend fun reupload(id: Int, targetChatId: Long) {
+        val msg = account.client.getMessage(sourceChatId, id.toLong() shl 20).getOrNull()
+        val file = msg?.content?.mainFile()
+        if (msg == null || file == null) {
+            log.error("[$tag] הודעה $id לא נטענה ב-TDLib — לא ניתן להוריד אותה")
+            report.failed()
+            return
+        }
+        var fileId = 0
+        var copy: File? = null
+        try {
+            var attempts = 0
+            while (true) {
+                awaitNotPaused()
+                report.phase("מוריד הודעה $id")
+                val path = account.download(file).getOrElse { e ->
+                    log.error("[$tag] הורדת הודעה $id נכשלה: ${e.message}")
+                    null
+                }
+                if (path == null) {
+                    if (++attempts >= 3) {
+                        report.failed()
+                        return
                     }
-                    report.failed()
+                    delay(5_000)
+                    continue
+                }
+                fileId = file.id
+                // Upload from a fresh copy: given TDLib's cached path, TDLib would reuse the protected remote file.
+                val c = copy ?: withContext(Dispatchers.IO) {
+                    val src = File(path)
+                    val dir = File(account.baseDir, "upload/$id").apply { mkdirs() }
+                    File(dir, src.name).also { src.copyTo(it, overwrite = true) }
+                }.also { copy = it }
+                val content = Copier.uploadContent(msg, c.absolutePath, job.stripLinks) ?: run {
+                    log.info("[$tag] דילוג על $id (סוג שלא ניתן להעלות)")
                     return
                 }
-                delay(3_000L * attempts)
+                report.phase("מעלה הודעה $id")
+                when (val r = account.sendAndWait(targetChatId, content)) {
+                    is SendOutcome.Sent -> {
+                        report.copied()
+                        report.delivered(targetChatId, r.messageId.serverId())
+                        log.success("[$tag] הועתקה הודעה $id (הורדה והעלאה)")
+                        return
+                    }
+                    is SendOutcome.Failed -> {
+                        if (r.retryAfterSec > 0) {
+                            report.phase("FloodWait — ממתין ${r.retryAfterSec} שנ'")
+                            delay((r.retryAfterSec + 1) * 1000L)
+                            continue
+                        }
+                        log.error("[$tag] העלאת הודעה $id נכשלה: ${r.code} ${r.message}")
+                        if (++attempts >= 3) {
+                            report.failed()
+                            return
+                        }
+                        delay(3_000L * attempts)
+                    }
+                }
             }
+        } finally {
+            if (fileId != 0) runCatching { account.deleteLocal(fileId) }
+            copy?.parentFile?.deleteRecursively()
         }
     }
 
