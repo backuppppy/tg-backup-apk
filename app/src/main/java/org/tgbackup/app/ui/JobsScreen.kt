@@ -163,11 +163,12 @@ private fun JobCard(
             }
             Text("${status.sourceTitle.ifBlank { job.source }}  ←  ${job.target}", style = MaterialTheme.typography.bodySmall)
             Text(
-                "${job.mediaType.label} · ${if (job.mode == JobMode.FAST) "מהיר" else "מסודר"} · חשבונות: " +
+                "${job.mediaType.label} · ${if (job.viaTakeout) "📡 בלי הורדה" else if (job.mode == JobMode.FAST) "מהיר" else "מסודר"} · חשבונות: " +
                     accNames.ifEmpty { listOf("—") }.joinToString(),
                 style = MaterialTheme.typography.bodySmall,
             )
-            if (status.isProtected) Text("🔒 ערוץ מוגן — הורדה והעלאה מחדש", style = MaterialTheme.typography.bodySmall)
+            if (job.viaTakeout) Text("📡 קריאה דרך סשן הייצוא ושליחה בלי הורדה", style = MaterialTheme.typography.bodySmall)
+            else if (status.isProtected) Text("🔒 ערוץ מוגן — הורדה והעלאה מחדש", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
             if (running) {
                 // Tapping the phase opens the last message copied into the target.
@@ -223,6 +224,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var startFrom by remember { mutableStateOf(if (initial.startFromId > 0) initial.startFromId.toString() else "") }
     var strip by remember { mutableStateOf(initial.stripLinks) }
     var limit by remember { mutableStateOf(initial.perMinuteLimit.toString()) }
+    var viaTakeout by remember { mutableStateOf(initial.viaTakeout) }
     val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty()
 
     AlertDialog(
@@ -258,7 +260,19 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                     }
                 }
 
-                if (selected.size > 1) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = viaTakeout, onCheckedChange = { viaTakeout = it })
+                    Text("  📡 העתקה בלי הורדה (דרך סשן הייצוא)")
+                }
+                if (viaTakeout) {
+                    Text(
+                        "עובד גם בערוצים מוגנים וחסומים. משתמש בחשבון הראשון בלבד. " +
+                            "בפעם הראשונה טלגרם עשוי לבקש לאשר את הייצוא בהודעת שירות.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                if (selected.size > 1 && !viaTakeout) {
                     Text("מצב עבודה", style = MaterialTheme.typography.labelLarge)
                     JobMode.entries.forEach { m -> RadioRow(m.label, mode == m) { mode = m } }
                 }
@@ -292,6 +306,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                         startFromId = startFrom.toLongOrNull() ?: 0,
                         stripLinks = strip,
                         perMinuteLimit = limit.toIntOrNull() ?: 25,
+                        viaTakeout = viaTakeout,
                     ),
                 )
             }) { Text("שמור") }

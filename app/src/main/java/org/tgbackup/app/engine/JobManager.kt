@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import io.sentry.Sentry
 import org.tgbackup.app.data.Store
+import org.tgbackup.app.export.ExportManager
 import org.tgbackup.app.tg.AccountManager
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Job as CoJob
@@ -52,6 +53,7 @@ class JobManager(
     private val accounts: AccountManager,
     private val log: LogBus,
     private val scope: CoroutineScope,
+    private val exports: () -> ExportManager,
 ) {
     private val _statuses = MutableStateFlow<Map<String, JobStatus>>(emptyMap())
     val statuses: StateFlow<Map<String, JobStatus>> = _statuses.asStateFlow()
@@ -105,19 +107,33 @@ class JobManager(
                         val clients = current.accountIds.mapNotNull { accounts[it] }
                         if (clients.isEmpty()) error("אף אחד מהחשבונות של המשימה לא מוגדר עם API ID")
                         log.info("[$label] מתחיל…")
-                        JobRunner(
-                            job = current,
-                            accounts = clients,
-                            store = store,
-                            log = log,
-                            paused = paused,
-                            report = reporter(jobId),
-                            clearStartFrom = {
-                                store.updateConfig { c ->
-                                    c.copy(jobs = c.jobs.map { if (it.id == jobId) it.copy(startFromId = 0) else it })
-                                }
-                            },
-                        ).run()
+                        val clearStartFrom = {
+                            store.updateConfig { c ->
+                                c.copy(jobs = c.jobs.map { if (it.id == jobId) it.copy(startFromId = 0) else it })
+                            }
+                        }
+                        if (current.viaTakeout) {
+                            TakeoutJobRunner(
+                                job = current,
+                                account = clients[0],
+                                exports = exports(),
+                                store = store,
+                                log = log,
+                                paused = paused,
+                                report = reporter(jobId),
+                                clearStartFrom = clearStartFrom,
+                            ).run()
+                        } else {
+                            JobRunner(
+                                job = current,
+                                accounts = clients,
+                                store = store,
+                                log = log,
+                                paused = paused,
+                                report = reporter(jobId),
+                                clearStartFrom = clearStartFrom,
+                            ).run()
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {

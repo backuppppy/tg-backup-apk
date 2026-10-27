@@ -146,6 +146,9 @@ class ExportManager(
         log.success("[${tdlib.tag}] סשן הייצוא מחובר")
     }
 
+    /** The account's export session, logged in, for copying jobs (see TakeoutJobRunner). */
+    suspend fun copyClient(account: Account): Result<MtpClient> = login(account).map { client(account) }
+
     suspend fun loadChats(account: Account, progress: (Int) -> Unit): List<ChatEntry> =
         ExportSupport.loadDialogs(client(account), progress)
 

@@ -40,6 +40,8 @@ data class Job(
     val startFromId: Long = 0,
     val stripLinks: Boolean = true,
     val perMinuteLimit: Int = 25,
+    /** Copy without downloading: read through the export (takeout) session and send files by reference. */
+    val viaTakeout: Boolean = false,
 )
 
 @Serializable

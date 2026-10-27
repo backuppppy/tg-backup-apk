@@ -19,6 +19,8 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    systemProperty("live", System.getProperty("live") ?: "false")
+    for (key in listOf("live", "step", "code", "password", "source")) {
+        systemProperty(key, System.getProperty(key) ?: "")
+    }
     testLogging { showStandardStreams = true }
 }

@@ -43,7 +43,7 @@ class App : Application() {
         log = LogBus(filesDir)
         store = Store(filesDir)
         accounts = AccountManager(filesDir, log)
-        jobs = JobManager(store, accounts, log, scope)
+        jobs = JobManager(store, accounts, log, scope) { exports }
         exports = ExportManager(filesDir, accounts, log)
         if (store.migratedFromLegacy) {
             log.info("ההגדרות יובאו מהגרסה הקודמת. יש להתחבר מחדש לכל חשבון (פעם אחת).")

@@ -120,32 +120,11 @@ private fun DialogInfo.Type.label(): String = when (this) {
 fun ExportScreen() {
     val app = App.instance
     val running by app.exports.running.collectAsState()
-    val password by app.exports.password.collectAsState()
     val current = running
     if (current != null) {
         ProgressPanel(current)
     } else {
         ExportSetup()
-    }
-    password?.let { request ->
-        var value by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { request.answer.complete(null) },
-            title = { Text("סיסמת אימות דו-שלבי") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("סשן הייצוא צריך את הסיסמה של החשבון." + if (request.hint.isNotBlank()) "\nרמז: ${request.hint}" else "")
-                    OutlinedTextField(
-                        value = value,
-                        onValueChange = { value = it },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                    )
-                }
-            },
-            confirmButton = { TextButton(onClick = { request.answer.complete(value) }) { Text("אישור") } },
-            dismissButton = { TextButton(onClick = { request.answer.complete(null) }) { Text("ביטול") } },
-        )
     }
 }
 
@@ -687,5 +666,31 @@ object StorageAccess {
         } else {
             (context as? android.app.Activity)?.requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 2)
         }
+    }
+}
+
+/** Asks for the 2FA password of an export session; shown over every tab, since copy jobs log in too. */
+@Composable
+fun ExportPasswordDialog() {
+    val password by App.instance.exports.password.collectAsState()
+    password?.let { request ->
+        var value by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { request.answer.complete(null) },
+            title = { Text("סיסמת אימות דו-שלבי") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("סשן הייצוא צריך את הסיסמה של החשבון." + if (request.hint.isNotBlank()) "\nרמז: ${request.hint}" else "")
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { value = it },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { request.answer.complete(value) }) { Text("אישור") } },
+            dismissButton = { TextButton(onClick = { request.answer.complete(null) }) { Text("ביטול") } },
+        )
     }
 }

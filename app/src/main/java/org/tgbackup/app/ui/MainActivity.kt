@@ -103,6 +103,7 @@ private fun AppRoot() {
                             else -> SettingsScreen()
                         }
                     }
+                    ExportPasswordDialog()
                 }
             }
         }
