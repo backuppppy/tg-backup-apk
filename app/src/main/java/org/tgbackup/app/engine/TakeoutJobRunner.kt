@@ -107,9 +107,15 @@ class TakeoutJobRunner(
 
         try {
             if (job.startFromId > 0) {
-                store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1) }
+                store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1, viaTakeout = true) }
                 clearStartFrom()
                 log.info("[$tag] מתחיל מהודעה ${job.startFromId}")
+            } else {
+                val existing = store.progress(job.id)
+                if (!existing.viaTakeout && existing.lastId > 0) {
+                    store.saveProgress(job.id) { Progress(viaTakeout = true) }
+                    log.info("[$tag] מאפס progress ממצב רגיל (lastId=${existing.lastId}) — מתחיל מההתחלה")
+                }
             }
 
             val fast = job.mode == JobMode.FAST && accounts.size > 1
@@ -168,7 +174,7 @@ class TakeoutJobRunner(
                     else log.info("[$tag] דילוג על $id (לא תואם לסינון)")
                 }
                 last = id.toLong()
-                store.saveProgress(job.id) { it.copy(lastId = last) }
+                store.saveProgress(job.id) { it.copy(lastId = last, viaTakeout = true) }
                 report.position(last)
             }
         }
@@ -202,7 +208,7 @@ class TakeoutJobRunner(
                 }
                 val ws = p.lastId + 1
                 val we = minOf(p.lastId + n * chunk, latest)
-                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap()) }
+                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = true) }
                 p = store.progress(job.id)
                 log.info("[$tag] סבב חדש: הודעות $ws–$we")
             } else {
@@ -217,7 +223,7 @@ class TakeoutJobRunner(
                 async { rangeWorker(i, workers[i], rs, re) }
             }.awaitAll()
             store.saveProgress(job.id) {
-                it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap())
+                it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), viaTakeout = true)
             }
             report.position(wave.waveEnd)
         }
@@ -258,7 +264,7 @@ class TakeoutJobRunner(
                     log.info("[$tag·${w.account.tag}] דילוג על $id (לא תואם לסינון)")
                 }
                 last = id.toLong()
-                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last)) }
+                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last), viaTakeout = true) }
             }
         }
     }

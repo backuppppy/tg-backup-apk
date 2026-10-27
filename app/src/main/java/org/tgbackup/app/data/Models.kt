@@ -59,4 +59,6 @@ data class Progress(
     val waveStart: Long = 0,
     val waveEnd: Long = 0,
     val workerLast: Map<Int, Long> = emptyMap(),
+    /** True when this progress was written by TakeoutJobRunner (viaTakeout mode). */
+    val viaTakeout: Boolean = false,
 )
