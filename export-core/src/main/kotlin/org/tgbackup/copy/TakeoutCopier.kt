@@ -208,6 +208,7 @@ class TakeoutCopier(
 
         var current = msg
         var refreshed = false
+        var triedPublicRef = false
         while (true) {
             val input = inputMedia(current.vmedia) ?: return Sent.Skipped("סוג מדיה שלא נתמך")
             try {
@@ -223,12 +224,84 @@ class TakeoutCopier(
                 )
                 return Sent.Ok(sentId(r))
             } catch (e: RpcError) {
-                if (refreshed || !e.type.startsWith("FILE_REFERENCE_")) throw e
-                refreshed = true
-                log("file reference of ${current.vid} expired, reading it again")
-                current = reload(source, current.vid) ?: throw e
+                when {
+                    !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
+                        triedPublicRef = true
+                        val publicMedia = findPublicRef(current) ?: throw e
+                        val r2 = client.invoke(
+                            MTPmessages_SendMedia(
+                                vpeer = target.input,
+                                vmedia = inputMedia(publicMedia)!!,
+                                vmessage = text,
+                                vrandom_id = Random.nextLong(),
+                                ventities = entities,
+                                is_invert_media = current.is_invert_media,
+                            ),
+                        )
+                        return Sent.Ok(sentId(r2))
+                    }
+                    !refreshed && e.type.startsWith("FILE_REFERENCE_") -> {
+                        refreshed = true
+                        log("file reference of ${current.vid} expired, reading it again")
+                        current = reload(source, current.vid) ?: throw e
+                    }
+                    else -> throw e
+                }
             }
         }
+    }
+
+    /**
+     * Searches for the same document in any accessible public (noforwards=false) channel.
+     * Returns the message media from there (with a public file_reference), or null if not found.
+     * Called when sendMedia fails with CHAT_FORWARDS_RESTRICTED.
+     */
+    private suspend fun findPublicRef(msg: MTPDmessage): MTPMessageMedia? {
+        val doc = (msg.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument ?: return null
+        val filename = doc.vattributes.filterIsInstance<MTPDdocumentAttributeFilename>()
+            .firstOrNull()?.vfile_name ?: return null
+        val q = filename.substringBeforeLast('.').take(40).trim()
+        if (q.length < 3) return null
+
+        val r = try {
+            client.invoke(
+                MTPmessages_SearchGlobal(
+                    vq = q,
+                    vfilter = MTPDinputMessagesFilterDocument,
+                    vmin_date = 0, vmax_date = 0,
+                    voffset_rate = 0, voffset_peer = MTPDinputPeerEmpty, voffset_id = 0,
+                    vlimit = 50,
+                ),
+            )
+        } catch (e: RpcError) { return null }
+
+        val (msgs, chats) = when (r) {
+            is MTPDmessages_messages -> r.vmessages to r.vchats
+            is MTPDmessages_messagesSlice -> r.vmessages to r.vchats
+            is MTPDmessages_channelMessages -> r.vmessages to r.vchats
+            else -> return null
+        }
+
+        for (m in msgs.filterIsInstance<MTPDmessage>()) {
+            val d = (m.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument ?: continue
+            if (d.vid != doc.vid) continue
+            when (val peer = m.vpeer_id) {
+                // Private chat or basic group: no noforwards restriction
+                is MTPDpeerUser, is MTPDpeerChat -> {
+                    log("found public ref for doc ${doc.vid} in private/group context")
+                    return m.vmedia
+                }
+                is MTPDpeerChannel -> {
+                    val ch = chats.filterIsInstance<MTPDchannel>().find { it.vid == peer.vchannel_id }
+                        ?: continue
+                    if (ch.is_noforwards) continue
+                    log("found public ref for doc ${doc.vid} in channel '${ch.vtitle}'")
+                    return m.vmedia
+                }
+                else -> continue
+            }
+        }
+        return null
     }
 
     companion object {
