@@ -224,8 +224,22 @@ class TakeoutJobRunner(
                     delay(60_000)
                     continue
                 }
-                val ws = p.lastId + 1
-                val we = minOf(p.lastId + n * chunk, latest)
+                // Jump past runs of missing ids (e.g. a channel whose first message is 34446) instead of
+                // spending a whole wave on each empty slice.
+                val next = try {
+                    workers[0].copier.historyAfter(workers[0].src, p.lastId.toInt(), 1)
+                        .firstOrNull()?.let { TakeoutCopier.idOf(it).toLong() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("[$tag] שגיאת רשת — מנסה שוב")
+                    report.phase("שגיאת רשת — מנסה שוב")
+                    delay(30_000)
+                    continue
+                }
+                val ws = next ?: (p.lastId + 1)
+                if (ws > p.lastId + 1) log.info("[$tag] מדלג על IDs ריקים ${p.lastId + 1}–${ws - 1}")
+                val we = minOf(ws + n * chunk - 1, latest)
                 store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = true) }
                 p = store.progress(job.id)
                 log.info("[$tag] סבב חדש: הודעות $ws–$we")
