@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -93,12 +94,22 @@ fun AccountsScreen() {
 
 @Composable
 private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit, onDelete: () -> Unit) {
+    val app = App.instance
     val toast = LocalToast.current
     val scope = rememberCoroutineScope()
     val auth by (client?.auth ?: remember { MutableStateFlow<AuthUi>(AuthUi.Unsupported("חסרים API ID / Hash")) }).collectAsState()
     val error by (client?.lastError ?: remember { MutableStateFlow<String?>(null) }).collectAsState()
+    val exportPrefs by app.exports.prefs.collectAsState()
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var exportLoggedIn by remember { mutableStateOf<Boolean?>(null) }
+    var exportBusy by remember { mutableStateOf(false) }
+
+    LaunchedEffect(acc.id, auth) {
+        exportLoggedIn = if (auth is AuthUi.Ready) {
+            runCatching { app.exports.isLoggedIn(acc) }.getOrDefault(false)
+        } else null
+    }
 
     fun act(block: suspend () -> String?) {
         busy = true
@@ -113,15 +124,38 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(acc.name.ifBlank { "ללא שם" }, style = MaterialTheme.typography.titleMedium)
             Text(acc.phone, style = MaterialTheme.typography.bodySmall)
-            val statusColor = when (auth) {
+
+            // ── Regular (TDLib) session ──────────────────────────────────────
+            val regularColor = when (auth) {
                 is AuthUi.Ready -> MaterialTheme.colorScheme.secondary
                 is AuthUi.Unsupported -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurface
             }
-            val statusText = (auth as? AuthUi.Ready)?.let { "✅ מחובר כ-${it.display}" } ?: auth.label
-            Text(statusText, color = statusColor)
+            val regularText = (auth as? AuthUi.Ready)?.let { "✅ סשן רגיל: מחובר כ-${it.display}" }
+                ?: "📱 סשן רגיל: ${auth.label}"
+            Text(regularText, color = regularColor)
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
+            // ── Export (MTProto) session ─────────────────────────────────────
+            if (auth is AuthUi.Ready) {
+                val now = (System.currentTimeMillis() / 1000).toInt()
+                val availAt = exportPrefs.availableAt[acc.id] ?: 0
+                val (exportText, exportColor) = when {
+                    exportBusy -> "📤 סשן ייצוא: בודק…" to MaterialTheme.colorScheme.onSurface
+                    exportLoggedIn == null -> "📤 סשן ייצוא: בודק…" to MaterialTheme.colorScheme.onSurface
+                    exportLoggedIn == false -> "📤 סשן ייצוא: לא מחובר" to MaterialTheme.colorScheme.onSurface
+                    availAt > now -> {
+                        val hrs = (availAt - now) / 3600
+                        val mins = ((availAt - now) % 3600) / 60
+                        val when_ = if (hrs > 0) "${hrs}ש' ${mins}ד'" else "${mins}ד'"
+                        "⏳ סשן ייצוא: ממתין לאישור ב-Telegram (עוד $when_)" to MaterialTheme.colorScheme.error
+                    }
+                    else -> "✅ סשן ייצוא: מחובר ומוכן" to MaterialTheme.colorScheme.secondary
+                }
+                Text(exportText, color = exportColor, style = MaterialTheme.typography.bodySmall)
+            }
+
+            // ── Auth input (existing flows) ──────────────────────────────────
             when (val a = auth) {
                 AuthUi.NeedPhone -> Button(enabled = !busy && client != null, onClick = { act { client!!.sendPhone() } }) {
                     Text("התחבר (שלח קוד)")
@@ -148,6 +182,7 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
                 else -> Unit
             }
 
+            // ── Regular session buttons ──────────────────────────────────────
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onEdit) { Text("ערוך") }
                 if (auth is AuthUi.Ready || auth is AuthUi.NeedCode || auth is AuthUi.NeedPassword) {
@@ -156,6 +191,36 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
                     }) { Text("התנתק") }
                 }
                 TextButton(onClick = onDelete) { Text("מחק", color = MaterialTheme.colorScheme.error) }
+            }
+
+            // ── Export session buttons ───────────────────────────────────────
+            if (auth is AuthUi.Ready) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    when {
+                        exportLoggedIn == false -> OutlinedButton(enabled = !exportBusy, onClick = {
+                            exportBusy = true
+                            scope.launch {
+                                app.exports.login(acc)
+                                    .onFailure { toast("חיבור סשן ייצוא נכשל: ${it.message}") }
+                                exportLoggedIn = runCatching { app.exports.isLoggedIn(acc) }.getOrDefault(false)
+                                exportBusy = false
+                            }
+                        }) { Text(if (exportBusy) "מחבר…" else "חבר סשן ייצוא") }
+
+                        exportLoggedIn == true -> OutlinedButton(enabled = !exportBusy, onClick = {
+                            exportBusy = true
+                            scope.launch {
+                                app.exports.checkTakeoutReady(acc)
+                                    .onSuccess { ready ->
+                                        if (ready) toast("✅ סשן הייצוא מוכן להעברה")
+                                        else toast("⏳ טלגרם עדיין ממתין לאישורך — לחץ Allow בהודעת טלגרם")
+                                    }
+                                    .onFailure { toast("בדיקה נכשלה: ${it.message}") }
+                                exportBusy = false
+                            }
+                        }) { Text(if (exportBusy) "בודק…" else "בדוק סשן ייצוא") }
+                    }
+                }
             }
         }
     }

@@ -41,7 +41,7 @@ fun CopyKind.matches(type: MediaType): Boolean {
         MediaType.PHOTO -> this == CopyKind.PHOTO
         MediaType.ALL_MEDIA -> fileLike || this == CopyKind.PHOTO
         MediaType.TEXT -> this == CopyKind.TEXT
-        MediaType.ALL -> this != CopyKind.OTHER
+        MediaType.ALL -> true
     }
 }
 
@@ -91,7 +91,7 @@ class TakeoutJobRunner(
         sourceChatId = source.id
         targetChatId = target.id
         // An opened chat keeps its loaded messages in TDLib memory, which the re-upload fallback reads.
-        accounts[0].client.openChat(source.id)
+        accounts.forEach { it.client.openChat(source.id) }
 
         report.phase(if (accounts.size > 1) "מחבר ${accounts.size} סשני ייצוא" else "מחבר את סשן הייצוא")
         val workers = accounts.map { ac ->
@@ -160,8 +160,26 @@ class TakeoutJobRunner(
                 continue
             }
             if (batch.isEmpty()) {
-                report.phase("מעודכן — ממתין להודעות חדשות")
-                delay(60_000)
+                val latest = try {
+                    w.copier.latestId(w.src).toLong()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("[$tag] שגיאת רשת בקריאת ID אחרון: ${e.message}")
+                    report.phase("שגיאת רשת — מנסה שוב")
+                    delay(15_000)
+                    continue
+                }
+                if (latest <= last) {
+                    report.phase("מעודכן — ממתין להודעות חדשות")
+                    delay(60_000)
+                    continue
+                }
+                // Messages exist beyond 'last' but historyAfter returned nothing — gap of deleted ids.
+                val next = minOf(last + 50, latest)
+                last = next
+                store.saveProgress(job.id) { it.copy(lastId = last, viaTakeout = true) }
+                report.position(last)
                 continue
             }
             for (m in batch) {
@@ -252,8 +270,9 @@ class TakeoutJobRunner(
                 delay(15_000)
                 continue
             }
+            if (batch.isEmpty()) break  // MTProto skips deleted ids natively; empty = range exhausted
             val inRange = batch.filter { TakeoutCopier.idOf(it) <= re.toInt() }
-            if (batch.isEmpty() || inRange.isEmpty()) break
+            if (inRange.isEmpty()) break
             for (m in inRange) {
                 coroutineContext.ensureActive()
                 awaitNotPaused()

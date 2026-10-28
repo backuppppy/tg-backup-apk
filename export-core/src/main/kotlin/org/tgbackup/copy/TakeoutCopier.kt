@@ -340,6 +340,31 @@ class TakeoutCopier(
                     vid = MTPDinputDocument(it.vid, it.vaccess_hash, it.vfile_reference),
                 )
             }
+            // Quiz polls need correct_answers which are not in the source message — skip them.
+            is MTPDmessageMediaPoll -> (media.vpoll as? MTPDpoll)?.takeIf { !it.is_quiz }?.let { poll ->
+                MTPDinputMediaPoll(
+                    vpoll = MTPDpoll(
+                        vid = 0,
+                        vquestion = poll.vquestion,
+                        vanswers = poll.vanswers,
+                        is_public_voters = poll.is_public_voters,
+                        is_multiple_choice = poll.is_multiple_choice,
+                        is_shuffle_answers = poll.is_shuffle_answers,
+                        is_revoting_disabled = poll.is_revoting_disabled,
+                        vhash = 0,
+                    ),
+                )
+            }
+            is MTPDmessageMediaDice -> MTPDinputMediaDice(vemoticon = media.vemoticon)
+            is MTPDmessageMediaGeo -> (media.vgeo as? MTPDgeoPoint)?.let { geo ->
+                MTPDinputMediaGeoPoint(vgeo_point = MTPDinputGeoPoint(vlat = geo.vlat, vlong = geo.vlong))
+            }
+            is MTPDmessageMediaContact -> MTPDinputMediaContact(
+                vphone_number = media.vphone_number,
+                vfirst_name = media.vfirst_name,
+                vlast_name = media.vlast_name,
+                vvcard = media.vvcard,
+            )
             else -> null
         }
 

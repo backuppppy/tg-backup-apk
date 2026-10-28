@@ -31,10 +31,12 @@ import org.tgbackup.export.Settings
 import org.tgbackup.export.TopicEntry
 import org.tgbackup.export.data.ExportTimeZone
 import org.tgbackup.export.output.Format
+import org.tgbackup.copy.TakeoutCopier
 import org.tgbackup.mtproto.AppInfo
 import org.tgbackup.mtproto.MtpClient
 import org.tgbackup.mtproto.MtpLogin
 import org.tgbackup.mtproto.MtpStorage
+import org.tgbackup.mtproto.RpcError
 import java.io.File
 
 /** The export options remembered between exports (Desktop's ExportSettings). */
@@ -148,6 +150,30 @@ class ExportManager(
 
     /** The account's export session, logged in, for copying jobs (see TakeoutJobRunner). */
     suspend fun copyClient(account: Account): Result<MtpClient> = login(account).map { client(account) }
+
+    /**
+     * Tries to open (and immediately close) a takeout session to verify readiness.
+     * Returns true = ready, false = still waiting for Telegram's 24h approval.
+     * On success, clears any stored availableAt delay for this account.
+     */
+    suspend fun checkTakeoutReady(account: Account): Result<Boolean> = runCatching {
+        login(account).getOrThrow()
+        val copier = TakeoutCopier(client(account))
+        try {
+            copier.begin()
+            updatePrefs { it.copy(availableAt = it.availableAt - account.id) }
+            true
+        } catch (e: RpcError) {
+            if (e.type.startsWith("TAKEOUT_INIT_DELAY")) {
+                val secs = maxOf(e.type.removePrefix("TAKEOUT_INIT_DELAY_").toIntOrNull() ?: 1, 1)
+                val at = (System.currentTimeMillis() / 1000).toInt() + secs
+                updatePrefs { it.copy(availableAt = it.availableAt + (account.id to at)) }
+                false
+            } else throw e
+        } finally {
+            runCatching { copier.finish() }
+        }
+    }
 
     suspend fun loadChats(account: Account, progress: (Int) -> Unit): List<ChatEntry> =
         ExportSupport.loadDialogs(client(account), progress)
