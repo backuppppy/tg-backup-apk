@@ -139,8 +139,8 @@ class TakeoutCopier(
 
     /** Up to [limit] messages with id > [afterId], oldest first, read through the takeout session. */
     suspend fun historyAfter(peer: CopyPeer, afterId: Int, limit: Int = 100): List<MTPMessage> {
-        // In a channel where the account is an admin, takeout getHistory returns only the account's
-        // own posts (30 of 225k messages in one case); an empty-query search returns the whole history.
+        // In a channel protected from forwarding, takeout getHistory returns only the account's own posts
+        // (or nothing); an empty-query search through takeout returns the whole history.
         val r = takeout(search(peer, offsetId = afterId + 1, addOffset = -limit, limit = limit, minId = afterId))
         return messagesOf(r).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
     }
