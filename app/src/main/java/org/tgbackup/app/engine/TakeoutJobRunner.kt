@@ -326,17 +326,42 @@ class TakeoutJobRunner(
                 return
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: TakeoutCopier.ForwardsRestricted) {
+                log.warn("[$who] טלגרם חוסם שליחה בלי הורדה של הודעה ${m.vid} (${e.reason}) — מוריד ומעלה מחדש")
+                reportReupload(w, m, e.reason, e.details, e.cause?.message ?: "")
+                reupload(w.account, m.vid)
+                return
             } catch (e: RpcError) {
                 if (e.type != "CHAT_FORWARDS_RESTRICTED") {
                     if (fail(m, who, "${e.code} ${e.type}", ++attempts)) return
                     continue
                 }
                 log.warn("[$who] טלגרם חוסם שליחה בלי הורדה של הודעה ${m.vid} — מוריד ומעלה מחדש")
+                reportReupload(w, m, "restricted-without-check", emptyMap(), "${e.code} ${e.type}")
                 reupload(w.account, m.vid)
                 return
             } catch (e: Exception) {
                 if (fail(m, who, e.message ?: e.javaClass.simpleName, ++attempts)) return
             }
+        }
+    }
+
+    /** Every fallback to download+upload goes to Sentry, grouped by reason and media kind. */
+    private fun reportReupload(w: Worker, m: MTPDmessage, reason: String, details: Map<String, String>, error: String) {
+        val kind = TakeoutCopier.kindOf(m).name
+        Sentry.captureMessage("Takeout copy fell back to download+upload: $reason ($kind)", SentryLevel.WARNING) { s ->
+            s.setFingerprint(listOf("takeout-reupload", reason, kind))
+            s.setTag("job", tag)
+            s.setTag("reason", reason)
+            s.setTag("kind", kind)
+            s.setTag("source_protected", w.src.isNoForwards.toString())
+            s.setTag("account_id", w.account.account.id)
+            s.setExtra("message_id", m.vid.toString())
+            s.setExtra("source", "${w.src.title} (${w.src.bareId})")
+            s.setExtra("link", "https://t.me/c/${w.src.bareId}/${m.vid}")
+            s.setExtra("target", "${w.dst.title} (${w.dst.bareId})")
+            s.setExtra("error", error)
+            details.forEach { (k, v) -> s.setExtra(k, v) }
         }
     }
 

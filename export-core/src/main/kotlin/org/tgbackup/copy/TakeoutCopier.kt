@@ -178,6 +178,13 @@ class TakeoutCopier(
         class Skipped(val why: String) : Sent()
     }
 
+    /** Telegram refused the file by reference and no unprotected copy of it could be used. */
+    class ForwardsRestricted(
+        val reason: String,
+        val details: Map<String, String>,
+        cause: RpcError,
+    ) : Exception("CHAT_FORWARDS_RESTRICTED: $reason", cause)
+
     /**
      * Sends [msg] (read from [source]) to [target]. An expired file reference is refreshed
      * once by reading the message again. Flood waits are waited out by the client.
@@ -241,17 +248,24 @@ class TakeoutCopier(
                 when {
                     !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
                         triedPublicRef = true
-                        val publicMedia = findPublicRef(current) ?: throw e
-                        val r2 = client.invoke(
-                            MTPmessages_SendMedia(
-                                vpeer = target.input,
-                                vmedia = inputMedia(publicMedia)!!,
-                                vmessage = text,
-                                vrandom_id = Random.nextLong(),
-                                ventities = entities,
-                                is_invert_media = current.is_invert_media,
-                            ),
-                        )
+                        val why = mediaDetails(current)
+                        val publicMedia = findPublicRef(current, why)
+                            ?: throw ForwardsRestricted(why.remove("reason") ?: "not-found", why, e)
+                        val r2 = try {
+                            client.invoke(
+                                MTPmessages_SendMedia(
+                                    vpeer = target.input,
+                                    vmedia = inputMedia(publicMedia)!!,
+                                    vmessage = text,
+                                    vrandom_id = Random.nextLong(),
+                                    ventities = entities,
+                                    is_invert_media = current.is_invert_media,
+                                ),
+                            )
+                        } catch (e2: RpcError) {
+                            if (e2.type != "CHAT_FORWARDS_RESTRICTED") throw e2
+                            throw ForwardsRestricted("public-copy-restricted", why, e2)
+                        }
                         return Sent.Ok(sentId(r2))
                     }
                     !refreshed && e.type.startsWith("FILE_REFERENCE_") -> {
@@ -265,17 +279,48 @@ class TakeoutCopier(
         }
     }
 
+    private fun mediaDetails(m: MTPDmessage): MutableMap<String, String> {
+        val d = mutableMapOf(
+            "kind" to kindOf(m).name,
+            "media" to (m.vmedia?.javaClass?.simpleName?.removePrefix("MTPDmessageMedia") ?: "none"),
+            "msg_noforwards" to m.is_noforwards.toString(),
+            "msg_out" to m.is_out.toString(),
+            "msg_forwarded" to (m.vfwd_from != null).toString(),
+            "msg_date" to m.vdate.toString(),
+        )
+        when (val media = m.vmedia) {
+            is MTPDmessageMediaDocument -> (media.vdocument as? MTPDdocument)?.let { doc ->
+                d["doc_id"] = doc.vid.toString()
+                d["doc_date"] = doc.vdate.toString()
+                d["doc_dc"] = doc.vdc_id.toString()
+                d["mime"] = doc.vmime_type
+                d["size"] = doc.vsize.toString()
+                doc.vattributes.filterIsInstance<MTPDdocumentAttributeFilename>().firstOrNull()?.let { d["file_name"] = it.vfile_name }
+            }
+            is MTPDmessageMediaPhoto -> (media.vphoto as? MTPDphoto)?.let { p ->
+                d["photo_id"] = p.vid.toString()
+                d["photo_date"] = p.vdate.toString()
+                d["photo_dc"] = p.vdc_id.toString()
+            }
+            else -> {}
+        }
+        return d
+    }
+
     /**
      * Searches for the same document in any accessible public (noforwards=false) channel.
-     * Returns the message media from there (with a public file_reference), or null if not found.
+     * Returns the message media from there (with a public file_reference), or null if not found;
+     * then [why] holds a "reason" code and what the search saw.
      * Called when sendMedia fails with CHAT_FORWARDS_RESTRICTED.
      */
-    private suspend fun findPublicRef(msg: MTPDmessage): MTPMessageMedia? {
-        val doc = (msg.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument ?: return null
+    private suspend fun findPublicRef(msg: MTPDmessage, why: MutableMap<String, String>): MTPMessageMedia? {
+        val doc = (msg.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument
+            ?: return null.also { why["reason"] = "not-a-document" }
         val filename = doc.vattributes.filterIsInstance<MTPDdocumentAttributeFilename>()
-            .firstOrNull()?.vfile_name ?: return null
+            .firstOrNull()?.vfile_name ?: return null.also { why["reason"] = "no-file-name" }
         val q = filename.substringBeforeLast('.').take(40).trim()
-        if (q.length < 3) return null
+        why["search_query"] = q
+        if (q.length < 3) return null.also { why["reason"] = "file-name-too-short" }
 
         val r = try {
             client.invoke(
@@ -287,15 +332,20 @@ class TakeoutCopier(
                     vlimit = 50,
                 ),
             )
-        } catch (e: RpcError) { return null }
+        } catch (e: RpcError) {
+            why["search_error"] = "${e.code} ${e.type}"
+            return null.also { why["reason"] = "search-error" }
+        }
 
         val (msgs, chats) = when (r) {
             is MTPDmessages_messages -> r.vmessages to r.vchats
             is MTPDmessages_messagesSlice -> r.vmessages to r.vchats
             is MTPDmessages_channelMessages -> r.vmessages to r.vchats
-            else -> return null
+            else -> return null.also { why["reason"] = "search-empty-response" }
         }
+        why["search_results"] = msgs.size.toString()
 
+        val protectedHits = mutableListOf<String>()
         for (m in msgs.filterIsInstance<MTPDmessage>()) {
             val d = (m.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument ?: continue
             if (d.vid != doc.vid) continue
@@ -303,17 +353,28 @@ class TakeoutCopier(
                 // Private chat or basic group: no noforwards restriction
                 is MTPDpeerUser, is MTPDpeerChat -> {
                     log("found public ref for doc ${doc.vid} in private/group context")
+                    why["public_copy"] = "private chat / basic group"
                     return m.vmedia
                 }
                 is MTPDpeerChannel -> {
                     val ch = chats.filterIsInstance<MTPDchannel>().find { it.vid == peer.vchannel_id }
                         ?: continue
-                    if (ch.is_noforwards) continue
+                    if (ch.is_noforwards) {
+                        protectedHits += "${ch.vtitle} (${ch.vid})"
+                        continue
+                    }
                     log("found public ref for doc ${doc.vid} in channel '${ch.vtitle}'")
+                    why["public_copy"] = "${ch.vtitle} (${ch.vid})"
                     return m.vmedia
                 }
                 else -> continue
             }
+        }
+        if (protectedHits.isNotEmpty()) {
+            why["protected_copies"] = protectedHits.joinToString()
+            why["reason"] = "only-in-protected-chats"
+        } else {
+            why["reason"] = "no-public-copy-found"
         }
         return null
     }
