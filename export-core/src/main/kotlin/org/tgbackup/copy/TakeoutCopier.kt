@@ -139,28 +139,22 @@ class TakeoutCopier(
 
     /** Up to [limit] messages with id > [afterId], oldest first, read through the takeout session. */
     suspend fun historyAfter(peer: CopyPeer, afterId: Int, limit: Int = 100): List<MTPMessage> {
-        val fn = MTPmessages_GetHistory(
-            vpeer = peer.input,
-            voffset_id = afterId + 1,
-            voffset_date = 0,
-            vadd_offset = -limit,
-            vlimit = limit,
-            vmax_id = 0,
-            vmin_id = afterId,
-            vhash = 0,
+        // min_id=max(afterId,1) anchors the lower bound to a concrete value.
+        // When afterId=0, using min_id=0 (no bound) causes InvokeWithTakeout to return
+        // the NEWEST messages instead of the OLDEST. min_id=1 fixes this.
+        val minId = if (afterId == 0) 1 else afterId
+        val r = takeout(
+            MTPmessages_GetHistory(
+                vpeer = peer.input,
+                voffset_id = afterId + 1,
+                voffset_date = 0,
+                vadd_offset = -limit,
+                vlimit = limit,
+                vmax_id = 0,
+                vmin_id = minId,
+                vhash = 0,
+            ),
         )
-        val r = if (afterId == 0) {
-            // In a takeout session (InvokeWithTakeout), the standard trick
-            // (offset_id=1, add_offset=-limit) incorrectly returns the NEWEST messages.
-            // For the initial read we only need message metadata, not takeout file references
-            // (send() already refreshes stale file references via reload()). Use a plain
-            // client call here; it returns the oldest messages correctly, just like a
-            // normal Telegram client session.
-            begin()
-            client.invoke(fn)
-        } else {
-            takeout(fn)
-        }
         return messagesOf(r).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
     }
 
