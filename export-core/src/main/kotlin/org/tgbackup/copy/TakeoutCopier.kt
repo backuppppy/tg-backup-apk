@@ -139,38 +139,29 @@ class TakeoutCopier(
 
     /** Up to [limit] messages with id > [afterId], oldest first, read through the takeout session. */
     suspend fun historyAfter(peer: CopyPeer, afterId: Int, limit: Int = 100): List<MTPMessage> {
-        // Takeout getHistory can see only a sliver of a channel (30 of 225k messages in one case),
-        // so the ids are listed with a plain request and the messages are then read via takeout.
-        val r = client.invoke(
-            MTPmessages_GetHistory(
-                vpeer = peer.input,
-                voffset_id = afterId + 1,
-                voffset_date = 0,
-                vadd_offset = -limit,
-                vlimit = limit,
-                vmax_id = 0,
-                vmin_id = afterId,
-                vhash = 0,
-            ),
-        )
-        val ids = messagesOf(r).map { idOf(it) }.filter { it > afterId }.distinct()
-        if (ids.isEmpty()) return emptyList()
-        val refs = ids.map { MTPDinputMessageID(it) }
-        val fn: TlFunction<MTPmessages_Messages> = peer.channel?.let { MTPchannels_GetMessages(it, refs) }
-            ?: MTPmessages_GetMessages(refs)
-        return messagesOf(takeout(fn)).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
+        // In a channel where the account is an admin, takeout getHistory returns only the account's
+        // own posts (30 of 225k messages in one case); an empty-query search returns the whole history.
+        val r = takeout(search(peer, offsetId = afterId + 1, addOffset = -limit, limit = limit, minId = afterId))
+        return messagesOf(r).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
     }
 
     /** The newest message id in [peer], or 0 for an empty chat. */
-    suspend fun latestId(peer: CopyPeer): Int {
-        val r = client.invoke(
-            MTPmessages_GetHistory(
-                vpeer = peer.input, voffset_id = 0, voffset_date = 0, vadd_offset = 0,
-                vlimit = 1, vmax_id = 0, vmin_id = 0, vhash = 0,
-            ),
-        )
-        return messagesOf(r).maxOfOrNull { idOf(it) } ?: 0
-    }
+    suspend fun latestId(peer: CopyPeer): Int =
+        messagesOf(takeout(search(peer, offsetId = 0, addOffset = 0, limit = 1, minId = 0))).maxOfOrNull { idOf(it) } ?: 0
+
+    private fun search(peer: CopyPeer, offsetId: Int, addOffset: Int, limit: Int, minId: Int) = MTPmessages_Search(
+        vpeer = peer.input,
+        vq = "",
+        vfilter = MTPDinputMessagesFilterEmpty,
+        vmin_date = 0,
+        vmax_date = 0,
+        voffset_id = offsetId,
+        vadd_offset = addOffset,
+        vlimit = limit,
+        vmax_id = 0,
+        vmin_id = minId,
+        vhash = 0,
+    )
 
     /** Reads one message again, e.g. to get a fresh file reference. */
     suspend fun reload(peer: CopyPeer, id: Int): MTPDmessage? {
