@@ -210,6 +210,22 @@ class TakeoutCopier(
             return Sent.Ok(sentId(r))
         }
 
+        // Paid media (Telegram Stars): the takeout session only returns a preview, not the real media.
+        // Copy the text caption if present; otherwise skip.
+        if (media is MTPDmessageMediaPaidMedia && inputMedia(media) == null) {
+            if (text.isBlank()) return Sent.Skipped("מדיה בתשלום — ללא כיתוב")
+            val r = client.invoke(
+                MTPmessages_SendMessage(
+                    vpeer = target.input,
+                    vmessage = text,
+                    vrandom_id = Random.nextLong(),
+                    ventities = entities,
+                    is_no_webpage = true,
+                ),
+            )
+            return Sent.Ok(sentId(r))
+        }
+
         var current = msg
         var refreshed = false
         var triedPublicRef = false
@@ -365,11 +381,23 @@ class TakeoutCopier(
                 vlast_name = media.vlast_name,
                 vvcard = media.vvcard,
             )
+            // Paid media: extract the first unlocked extended_media item (available in a takeout session).
+            is MTPDmessageMediaPaidMedia -> media.vextended_media
+                .filterIsInstance<MTPDmessageExtendedMedia>()
+                .firstOrNull()
+                ?.let { inputMedia(it.vmedia) }
             else -> null
         }
 
-        fun kindOf(m: MTPDmessage): CopyKind = when (val media = m.vmedia) {
+        fun kindOf(m: MTPDmessage): CopyKind = kindOfMedia(m.vmedia)
+
+        private fun kindOfMedia(media: MTPMessageMedia?): CopyKind = when (media) {
             null, is MTPDmessageMediaEmpty, is MTPDmessageMediaWebPage -> CopyKind.TEXT
+            // Paid media: determine kind from the first unlocked extended_media item (takeout session).
+            is MTPDmessageMediaPaidMedia -> media.vextended_media
+                .filterIsInstance<MTPDmessageExtendedMedia>()
+                .firstOrNull()
+                ?.let { kindOfMedia(it.vmedia) } ?: CopyKind.OTHER
             is MTPDmessageMediaPhoto -> if (media.vphoto is MTPDphoto) CopyKind.PHOTO else CopyKind.OTHER
             is MTPDmessageMediaDocument -> {
                 val d = media.vdocument as? MTPDdocument
