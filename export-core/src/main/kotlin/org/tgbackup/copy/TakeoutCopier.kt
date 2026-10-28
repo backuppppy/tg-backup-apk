@@ -139,11 +139,9 @@ class TakeoutCopier(
 
     /** Up to [limit] messages with id > [afterId], oldest first, read through the takeout session. */
     suspend fun historyAfter(peer: CopyPeer, afterId: Int, limit: Int = 100): List<MTPMessage> {
-        // min_id=max(afterId,1) anchors the lower bound to a concrete value.
-        // When afterId=0, using min_id=0 (no bound) causes InvokeWithTakeout to return
-        // the NEWEST messages instead of the OLDEST. min_id=1 fixes this.
-        val minId = if (afterId == 0) 1 else afterId
-        val r = takeout(
+        // Takeout getHistory can see only a sliver of a channel (30 of 225k messages in one case),
+        // so the ids are listed with a plain request and the messages are then read via takeout.
+        val r = client.invoke(
             MTPmessages_GetHistory(
                 vpeer = peer.input,
                 voffset_id = afterId + 1,
@@ -151,16 +149,21 @@ class TakeoutCopier(
                 vadd_offset = -limit,
                 vlimit = limit,
                 vmax_id = 0,
-                vmin_id = minId,
+                vmin_id = afterId,
                 vhash = 0,
             ),
         )
-        return messagesOf(r).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
+        val ids = messagesOf(r).map { idOf(it) }.filter { it > afterId }.distinct()
+        if (ids.isEmpty()) return emptyList()
+        val refs = ids.map { MTPDinputMessageID(it) }
+        val fn: TlFunction<MTPmessages_Messages> = peer.channel?.let { MTPchannels_GetMessages(it, refs) }
+            ?: MTPmessages_GetMessages(refs)
+        return messagesOf(takeout(fn)).filter { idOf(it) > afterId }.sortedBy { idOf(it) }
     }
 
     /** The newest message id in [peer], or 0 for an empty chat. */
     suspend fun latestId(peer: CopyPeer): Int {
-        val r = takeout(
+        val r = client.invoke(
             MTPmessages_GetHistory(
                 vpeer = peer.input, voffset_id = 0, voffset_date = 0, vadd_offset = 0,
                 vlimit = 1, vmax_id = 0, vmin_id = 0, vhash = 0,
