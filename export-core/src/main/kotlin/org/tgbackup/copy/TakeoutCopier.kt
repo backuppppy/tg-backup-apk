@@ -245,7 +245,7 @@ class TakeoutCopier(
                 return Sent.Ok(sentId(r))
             } catch (e: RpcError) {
                 when {
-                    !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" && source.isNoForwards -> {
+                    !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
                         triedPublicRef = true
                         val publicMedia = findPublicRef(current) ?: throw e
                         val r2 = client.invoke(
