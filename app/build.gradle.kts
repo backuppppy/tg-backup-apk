@@ -5,10 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-val appVersionName = "2.2.9"
+val appVersionName = "2.2.10"
 // The old Python/buildozer builds used large generated version codes, so this
 // stays above them to let the new APK install as an update over the old one.
-val appVersionCode = 2_000_022_009
+val appVersionCode = 2_000_022_010
 
 android {
     namespace = "org.tgbackup.app"

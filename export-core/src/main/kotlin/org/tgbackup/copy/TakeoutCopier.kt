@@ -15,7 +15,7 @@ class SourceMessage(val raw: MTPDmessage) {
 }
 
 /** A channel or basic group the copier can read from or send to. */
-class CopyPeer(val bareId: Long, val title: String, val input: MTPInputPeer) {
+class CopyPeer(val bareId: Long, val title: String, val input: MTPInputPeer, val isNoForwards: Boolean = false) {
     val channel: MTPInputChannel?
         get() = (input as? MTPDinputPeerChannel)?.let { MTPDinputChannel(it.vchannel_id, it.vaccess_hash) }
 }
@@ -81,7 +81,7 @@ class TakeoutCopier(
         fun take(chats: List<MTPChat>) {
             for (c in chats) {
                 val peer = when (c) {
-                    is MTPDchannel -> CopyPeer(c.vid, c.vtitle, MTPDinputPeerChannel(c.vid, c.vaccess_hash ?: 0))
+                    is MTPDchannel -> CopyPeer(c.vid, c.vtitle, MTPDinputPeerChannel(c.vid, c.vaccess_hash ?: 0), c.is_noforwards)
                     is MTPDchat -> CopyPeer(c.vid, c.vtitle, MTPDinputPeerChat(c.vid))
                     else -> null
                 } ?: continue
@@ -245,7 +245,7 @@ class TakeoutCopier(
                 return Sent.Ok(sentId(r))
             } catch (e: RpcError) {
                 when {
-                    !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
+                    !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" && source.isNoForwards -> {
                         triedPublicRef = true
                         val publicMedia = findPublicRef(current) ?: throw e
                         val r2 = client.invoke(
