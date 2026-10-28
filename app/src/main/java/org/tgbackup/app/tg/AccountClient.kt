@@ -206,6 +206,12 @@ class AccountClient(
         Regex("""t\.me/c/(\d+)""").find(input)?.let { m ->
             return chatByIds(listOf(-CHANNEL_SHIFT - m.groupValues[1].toLong()))
         }
+        // Invite link (t.me/+hash, t.me/joinchat/hash): TDLib returns the chat id when the account is a member.
+        if (Regex("""t\.me/(\+|joinchat/)|tg://join\?invite=""").containsMatchIn(input)) {
+            val link = if (input.contains("://")) input else "https://$input"
+            val chatId = client.checkChatInviteLink(link).getOrNull()?.chatId ?: 0L
+            return if (chatId != 0L) client.getChat(chatId).getOrNull() else null
+        }
         input.toLongOrNull()?.let { n -> return chatByIds(idCandidates(n)) }
         val username = Regex("""(?:t\.me/|@)?([A-Za-z][A-Za-z0-9_]{3,})/?$""").find(input.removePrefix("https://"))
             ?.groupValues?.get(1) ?: return null

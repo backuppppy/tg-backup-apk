@@ -249,7 +249,7 @@ class TakeoutCopier(
                     !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
                         triedPublicRef = true
                         val why = mediaDetails(current)
-                        val publicMedia = findPublicRef(current, why)
+                        val publicMedia = findPublicRef(current, target, why)
                             ?: throw ForwardsRestricted(why.remove("reason") ?: "not-found", why, e)
                         val r2 = try {
                             client.invoke(
@@ -308,12 +308,12 @@ class TakeoutCopier(
     }
 
     /**
-     * Searches for the same document in any accessible public (noforwards=false) channel.
-     * Returns the message media from there (with a public file_reference), or null if not found;
-     * then [why] holds a "reason" code and what the search saw.
+     * Searches for the same document where it is not protected: first in [target] itself, then
+     * globally. Returns the message media from there (with a usable file_reference), or null;
+     * then [why] holds a "reason" code and what the searches saw.
      * Called when sendMedia fails with CHAT_FORWARDS_RESTRICTED.
      */
-    private suspend fun findPublicRef(msg: MTPDmessage, why: MutableMap<String, String>): MTPMessageMedia? {
+    private suspend fun findPublicRef(msg: MTPDmessage, target: CopyPeer, why: MutableMap<String, String>): MTPMessageMedia? {
         val doc = (msg.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument
             ?: return null.also { why["reason"] = "not-a-document" }
         val filename = doc.vattributes.filterIsInstance<MTPDdocumentAttributeFilename>()
@@ -321,57 +321,104 @@ class TakeoutCopier(
         val q = filename.substringBeforeLast('.').take(40).trim()
         why["search_query"] = q
         if (q.length < 3) return null.also { why["reason"] = "file-name-too-short" }
+        fun sameDoc(m: MTPDmessage) = ((m.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument)?.vid == doc.vid
 
-        val r = try {
-            client.invoke(
-                MTPmessages_SearchGlobal(
-                    vq = q,
-                    vfilter = MTPDinputMessagesFilterDocument,
-                    vmin_date = 0, vmax_date = 0,
-                    voffset_rate = 0, voffset_peer = MTPDinputPeerEmpty, voffset_id = 0,
-                    vlimit = 50,
-                ),
-            )
-        } catch (e: RpcError) {
-            why["search_error"] = "${e.code} ${e.type}"
-            return null.also { why["reason"] = "search-error" }
+        // The target often already holds this file from an earlier copy, and global search can miss it
+        // (0 results for a name with underscores in one case).
+        if (!target.isNoForwards) {
+            try {
+                val r = client.invoke(
+                    MTPmessages_Search(
+                        vpeer = target.input, vq = q, vfilter = MTPDinputMessagesFilterDocument,
+                        vmin_date = 0, vmax_date = 0, voffset_id = 0, vadd_offset = 0, vlimit = 50,
+                        vmax_id = 0, vmin_id = 0, vhash = 0,
+                    ),
+                )
+                val list = messagesOf(r).filterIsInstance<MTPDmessage>()
+                why["target_search_results"] = list.size.toString()
+                list.firstOrNull { sameDoc(it) }?.let {
+                    log("found public ref for doc ${doc.vid} in the target channel")
+                    why["public_copy"] = "target ${target.title} (${target.bareId})"
+                    return it.vmedia
+                }
+            } catch (e: RpcError) {
+                why["target_search_error"] = "${e.code} ${e.type}"
+            }
         }
-
-        val (msgs, chats) = when (r) {
-            is MTPDmessages_messages -> r.vmessages to r.vchats
-            is MTPDmessages_messagesSlice -> r.vmessages to r.vchats
-            is MTPDmessages_channelMessages -> r.vmessages to r.vchats
-            else -> return null.also { why["reason"] = "search-empty-response" }
-        }
-        why["search_results"] = msgs.size.toString()
 
         val protectedHits = mutableListOf<String>()
-        for (m in msgs.filterIsInstance<MTPDmessage>()) {
-            val d = (m.vmedia as? MTPDmessageMediaDocument)?.vdocument as? MTPDdocument ?: continue
-            if (d.vid != doc.vid) continue
-            when (val peer = m.vpeer_id) {
-                // Private chat or basic group: no noforwards restriction
-                is MTPDpeerUser, is MTPDpeerChat -> {
-                    log("found public ref for doc ${doc.vid} in private/group context")
-                    why["public_copy"] = "private chat / basic group"
-                    return m.vmedia
-                }
-                is MTPDpeerChannel -> {
-                    val ch = chats.filterIsInstance<MTPDchannel>().find { it.vid == peer.vchannel_id }
-                        ?: continue
-                    if (ch.is_noforwards) {
-                        protectedHits += "${ch.vtitle} (${ch.vid})"
-                        continue
+        var results = 0
+        var offRate = 0
+        var offPeer: MTPInputPeer = MTPDinputPeerEmpty
+        var offId = 0
+        for (page in 1..GLOBAL_SEARCH_PAGES) {
+            val r = try {
+                client.invoke(
+                    MTPmessages_SearchGlobal(
+                        vq = q,
+                        vfilter = MTPDinputMessagesFilterDocument,
+                        vmin_date = 0, vmax_date = 0,
+                        voffset_rate = offRate, voffset_peer = offPeer, voffset_id = offId,
+                        vlimit = 50,
+                    ),
+                )
+            } catch (e: RpcError) {
+                why["search_error"] = "${e.code} ${e.type}"
+                why["search_pages"] = (page - 1).toString()
+                why["search_results"] = results.toString()
+                return null.also { why["reason"] = "search-error" }
+            }
+            val (msgs, chats) = when (r) {
+                is MTPDmessages_messages -> r.vmessages to r.vchats
+                is MTPDmessages_messagesSlice -> r.vmessages to r.vchats
+                is MTPDmessages_channelMessages -> r.vmessages to r.vchats
+                else -> emptyList<MTPMessage>() to emptyList()
+            }
+            results += msgs.size
+            why["search_pages"] = page.toString()
+            why["search_results"] = results.toString()
+            (r as? MTPDmessages_messagesSlice)?.let { why["search_total"] = it.vcount.toString() }
+
+            for (m in msgs.filterIsInstance<MTPDmessage>()) {
+                if (!sameDoc(m)) continue
+                when (val peer = m.vpeer_id) {
+                    // Private chat or basic group: no noforwards restriction
+                    is MTPDpeerUser, is MTPDpeerChat -> {
+                        log("found public ref for doc ${doc.vid} in private/group context")
+                        why["public_copy"] = "private chat / basic group"
+                        return m.vmedia
                     }
-                    log("found public ref for doc ${doc.vid} in channel '${ch.vtitle}'")
-                    why["public_copy"] = "${ch.vtitle} (${ch.vid})"
-                    return m.vmedia
+                    is MTPDpeerChannel -> {
+                        val ch = chats.filterIsInstance<MTPDchannel>().find { it.vid == peer.vchannel_id }
+                            ?: continue
+                        if (ch.is_noforwards) {
+                            protectedHits += "${ch.vtitle} (${ch.vid})"
+                            continue
+                        }
+                        log("found public ref for doc ${doc.vid} in channel '${ch.vtitle}'")
+                        why["public_copy"] = "${ch.vtitle} (${ch.vid})"
+                        return m.vmedia
+                    }
+                    else -> continue
                 }
-                else -> continue
+            }
+
+            val nextRate = (r as? MTPDmessages_messagesSlice)?.vnext_rate
+            val last = msgs.lastOrNull() as? MTPDmessage
+            if (nextRate == null || last == null || msgs.size < 50) break
+            offRate = nextRate
+            offId = last.vid
+            offPeer = when (val p = last.vpeer_id) {
+                is MTPDpeerChannel -> MTPDinputPeerChannel(
+                    p.vchannel_id,
+                    chats.filterIsInstance<MTPDchannel>().find { it.vid == p.vchannel_id }?.vaccess_hash ?: 0,
+                )
+                is MTPDpeerChat -> MTPDinputPeerChat(p.vchat_id)
+                else -> break
             }
         }
         if (protectedHits.isNotEmpty()) {
-            why["protected_copies"] = protectedHits.joinToString()
+            why["protected_copies"] = protectedHits.distinct().joinToString()
             why["reason"] = "only-in-protected-chats"
         } else {
             why["reason"] = "no-public-copy-found"
@@ -381,6 +428,7 @@ class TakeoutCopier(
 
     companion object {
         const val MAX_FILE_SIZE = 4000L * 1024 * 1024
+        const val GLOBAL_SEARCH_PAGES = 4
 
         val LINK_REGEX = Regex("""https?://\S+|www\.\S+|t\.me/\S+|@\S+""")
 

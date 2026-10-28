@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import io.sentry.Sentry
 import org.tgbackup.app.data.Store
 import org.tgbackup.app.export.ExportManager
 import org.tgbackup.app.tg.AccountManager
@@ -137,7 +136,7 @@ class JobManager(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
-                        Sentry.captureException(e) { s -> s.setTag("job", label) }
+                        SentryOnce.exception("job-crash|$jobId|${e::class.java.name}|${e.message}", e) { s -> s.setTag("job", label) }
                         log.error("[$label] ${e.message ?: e::class.simpleName} — מפעיל מחדש בעוד 15 שנ'")
                         setStatus(jobId) { it.copy(phase = "שגיאה — מפעיל מחדש בעוד 15 שנ'") }
                         delay(15_000)

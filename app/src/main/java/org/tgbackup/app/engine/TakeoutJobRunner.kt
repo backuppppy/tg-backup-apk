@@ -1,6 +1,5 @@
 package org.tgbackup.app.engine
 
-import io.sentry.Sentry
 import io.sentry.SentryLevel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -144,16 +143,19 @@ class TakeoutJobRunner(
                 throw e
             } catch (e: RpcError) {
                 if (e.type.startsWith("TAKEOUT_INIT_DELAY")) {
+                    problem("init-delay", "waiting for Telegram to approve the export session (${e.type})", SentryLevel.INFO)
                     report.phase("ממתין לאישור הייצוא בטלגרם")
                     log.warn("[$tag] טלגרם מבקש לאשר את הייצוא — אשר בהודעת השירות של טלגרם, ממשיך אוטומטית אחרי האישור")
                     delay(60_000)
                     continue
                 }
+                problem("history|${e.type}", "reading history failed: ${e.code} ${e.type}", extras = mapOf("after_id" to last.toString()))
                 log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
                 report.phase("שגיאה — מנסה שוב")
                 delay(15_000)
                 continue
             } catch (e: Exception) {
+                problem("history|${e.javaClass.simpleName}", "reading history failed: ${e.message}", extras = mapOf("after_id" to last.toString()))
                 log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
                 report.phase("שגיאת רשת — מנסה שוב")
                 delay(15_000)
@@ -165,6 +167,7 @@ class TakeoutJobRunner(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    problem("latest|${e.javaClass.simpleName}", "reading the latest message id failed: ${e.message}")
                     log.error("[$tag] שגיאת רשת בקריאת ID אחרון: ${e.message}")
                     report.phase("שגיאת רשת — מנסה שוב")
                     delay(15_000)
@@ -214,6 +217,7 @@ class TakeoutJobRunner(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    problem("latest|${e.javaClass.simpleName}", "reading the latest message id failed: ${e.message}")
                     log.error("[$tag] שגיאת רשת — מנסה שוב")
                     report.phase("שגיאת רשת — מנסה שוב")
                     delay(30_000)
@@ -232,6 +236,7 @@ class TakeoutJobRunner(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    problem("history|${e.javaClass.simpleName}", "reading history failed: ${e.message}", extras = mapOf("after_id" to p.lastId.toString()))
                     log.error("[$tag] שגיאת רשת — מנסה שוב")
                     report.phase("שגיאת רשת — מנסה שוב")
                     delay(30_000)
@@ -271,15 +276,18 @@ class TakeoutJobRunner(
                 throw e
             } catch (e: RpcError) {
                 if (e.type.startsWith("TAKEOUT_INIT_DELAY")) {
+                    problem("init-delay", "waiting for Telegram to approve the export session (${e.type})", SentryLevel.INFO)
                     report.phase("ממתין לאישור הייצוא בטלגרם")
                     log.warn("[$tag·${w.account.tag}] טלגרם מבקש לאשר את הייצוא — אשר בהודעת השירות")
                     delay(60_000)
                     continue
                 }
+                problem("history|${e.type}", "reading history failed: ${e.code} ${e.type}", extras = mapOf("after_id" to last.toString()))
                 log.error("[$tag·${w.account.tag}] קריאת היסטוריה נכשלה: ${e.message}")
                 delay(15_000)
                 continue
             } catch (e: Exception) {
+                problem("history|${e.javaClass.simpleName}", "reading history failed: ${e.message}", extras = mapOf("after_id" to last.toString()))
                 log.error("[$tag·${w.account.tag}] קריאת היסטוריה נכשלה: ${e.message}")
                 delay(15_000)
                 continue
@@ -346,10 +354,19 @@ class TakeoutJobRunner(
         }
     }
 
-    /** Every fallback to download+upload goes to Sentry, grouped by reason and media kind. */
+    /** Reports a takeout problem to Sentry once per app version, job and [key]. */
+    private fun problem(key: String, text: String, level: SentryLevel = SentryLevel.WARNING, extras: Map<String, String> = emptyMap()) {
+        SentryOnce.message("takeout|${job.id}|$key", "Takeout: $text", level) { s ->
+            s.setTag("job", tag)
+            s.setTag("takeout", key.substringBefore('|'))
+            extras.forEach { (k, v) -> s.setExtra(k, v) }
+        }
+    }
+
+    /** A fallback to download+upload goes to Sentry once per job, reason and media kind. */
     private fun reportReupload(w: Worker, m: MTPDmessage, reason: String, details: Map<String, String>, error: String) {
         val kind = TakeoutCopier.kindOf(m).name
-        Sentry.captureMessage("Takeout copy fell back to download+upload: $reason ($kind)", SentryLevel.WARNING) { s ->
+        SentryOnce.message("takeout-reupload|${job.id}|$reason|$kind", "Takeout copy fell back to download+upload: $reason ($kind)", SentryLevel.WARNING) { s ->
             s.setFingerprint(listOf("takeout-reupload", reason, kind))
             s.setTag("job", tag)
             s.setTag("reason", reason)
@@ -369,10 +386,7 @@ class TakeoutJobRunner(
     private suspend fun fail(m: MTPDmessage, who: String, text: String, attempts: Int): Boolean {
         log.error("[$who] שליחת הודעה ${m.vid} נכשלה: $text")
         if (attempts >= 3) {
-            Sentry.captureMessage("Takeout send failed: $text", SentryLevel.WARNING) { s ->
-                s.setTag("job", tag)
-                s.setExtra("message_id", m.vid.toString())
-            }
+            problem("send-failed|$text", "send failed: $text", extras = mapOf("message_id" to m.vid.toString(), "kind" to TakeoutCopier.kindOf(m).name))
             report.failed()
             return true
         }
@@ -385,6 +399,12 @@ class TakeoutJobRunner(
         val msg = account.client.getMessage(sourceChatId, id.toLong() shl 20).getOrNull()
         val file = msg?.content?.mainFile()
         if (msg == null || file == null) {
+            problem(
+                if (msg == null) "reupload-not-in-tdlib" else "reupload-no-file",
+                if (msg == null) "message not loaded in TDLib, cannot download it" else "TDLib message has no file to download",
+                SentryLevel.ERROR,
+                mapOf("message_id" to id.toString(), "content" to (msg?.content?.javaClass?.simpleName ?: "null")),
+            )
             log.error("[$tag] הודעה $id לא נטענה ב-TDLib — לא ניתן להוריד אותה")
             report.failed()
             return
@@ -396,12 +416,16 @@ class TakeoutJobRunner(
             while (true) {
                 awaitNotPaused()
                 report.phase("מוריד הודעה $id")
+                var downloadError = ""
                 val path = account.download(file).getOrElse { e ->
+                    downloadError = e.message ?: e.javaClass.simpleName
                     log.error("[$tag] הורדת הודעה $id נכשלה: ${e.message}")
                     null
                 }
                 if (path == null) {
                     if (++attempts >= 3) {
+                        problem("download-failed|$downloadError", "download for re-upload failed: $downloadError", SentryLevel.ERROR,
+                            mapOf("message_id" to id.toString(), "size" to file.size.toString()))
                         report.failed()
                         return
                     }
@@ -416,6 +440,8 @@ class TakeoutJobRunner(
                     File(dir, src.name).also { src.copyTo(it, overwrite = true) }
                 }.also { copy = it }
                 val content = Copier.uploadContent(msg, c.absolutePath, job.stripLinks) ?: run {
+                    problem("reupload-unsupported|${msg.content.javaClass.simpleName}", "re-upload skipped, content type not supported",
+                        SentryLevel.INFO, mapOf("message_id" to id.toString()))
                     log.info("[$tag] דילוג על $id (סוג שלא ניתן להעלות)")
                     return
                 }
@@ -435,6 +461,8 @@ class TakeoutJobRunner(
                         }
                         log.error("[$tag] העלאת הודעה $id נכשלה: ${r.code} ${r.message}")
                         if (++attempts >= 3) {
+                            problem("upload-failed|${r.code}|${r.message}", "re-upload failed: ${r.code} ${r.message}", SentryLevel.ERROR,
+                                mapOf("message_id" to id.toString()))
                             report.failed()
                             return
                         }

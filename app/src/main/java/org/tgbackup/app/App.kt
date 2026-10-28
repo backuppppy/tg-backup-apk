@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import org.tgbackup.app.data.Store
 import org.tgbackup.app.engine.JobManager
 import org.tgbackup.app.engine.LogBus
+import org.tgbackup.app.engine.SentryOnce
 import org.tgbackup.app.export.ExportManager
 import org.tgbackup.app.service.BackupService
 import org.tgbackup.app.tg.AccountManager
@@ -40,6 +41,7 @@ class App : Application() {
             options.tracesSampleRate = 0.0
             options.isAttachThreads = true
         }
+        SentryOnce.init(filesDir)
         log = LogBus(filesDir)
         store = Store(filesDir)
         accounts = AccountManager(filesDir, log)
