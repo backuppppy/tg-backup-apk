@@ -33,6 +33,9 @@ class TakeoutCopier(
 ) {
     private var takeoutId: Long? = null
 
+    /** When true, a file not found by search is looked for by scanning the account's own channels' media by id. */
+    var deepScan: Boolean = false
+
     val hasTakeout: Boolean get() = takeoutId != null
 
     /** Opens the takeout session. Throws RpcError TAKEOUT_INIT_DELAY_x until the user approves it. */
@@ -346,6 +349,101 @@ class TakeoutCopier(
         else -> emptyList()
     }
 
+    private var ownPeersCache: List<CopyPeer>? = null
+
+    /** Every unprotected channel/group the account is a member of (fetched once, cached). */
+    private suspend fun ownUnprotectedPeers(): List<CopyPeer> {
+        ownPeersCache?.let { return it }
+        val out = LinkedHashMap<Long, CopyPeer>()
+        for (folder in listOf(0, 1)) {
+            var offsetDate = 0
+            var offsetId = 0
+            var offsetPeer: MTPInputPeer = MTPDinputPeerEmpty
+            while (true) {
+                val d = try {
+                    client.invoke(
+                        MTPmessages_GetDialogs(
+                            vfolder_id = folder, voffset_date = offsetDate, voffset_id = offsetId,
+                            voffset_peer = offsetPeer, vlimit = 100, vhash = 0,
+                        ),
+                    )
+                } catch (e: RpcError) { break }
+                val (dialogs, messages, chats, users) = when (d) {
+                    is MTPDmessages_dialogs -> Quad(d.vdialogs, d.vmessages, d.vchats, d.vusers)
+                    is MTPDmessages_dialogsSlice -> Quad(d.vdialogs, d.vmessages, d.vchats, d.vusers)
+                    else -> break
+                }
+                for (c in chats.filterIsInstance<MTPDchannel>()) {
+                    if (!c.is_noforwards && !c.is_left) {
+                        out.getOrPut(c.vid) { CopyPeer(c.vid, c.vtitle, MTPDinputPeerChannel(c.vid, c.vaccess_hash ?: 0), false) }
+                    }
+                }
+                if (d !is MTPDmessages_dialogsSlice) break
+                val last = dialogs.filterIsInstance<MTPDdialog>().lastOrNull() ?: break
+                offsetDate = messages.firstNotNullOfOrNull { m ->
+                    when {
+                        m is MTPDmessage && m.vid == last.vtop_message && m.vpeer_id.same(last.vpeer) -> m.vdate
+                        m is MTPDmessageService && m.vid == last.vtop_message && m.vpeer_id.same(last.vpeer) -> m.vdate
+                        else -> null
+                    }
+                } ?: break
+                offsetId = last.vtop_message
+                offsetPeer = when (val p = last.vpeer) {
+                    is MTPDpeerChannel -> MTPDinputPeerChannel(p.vchannel_id, chats.filterIsInstance<MTPDchannel>().find { it.vid == p.vchannel_id }?.vaccess_hash ?: 0)
+                    is MTPDpeerChat -> MTPDinputPeerChat(p.vchat_id)
+                    is MTPDpeerUser -> MTPDinputPeerUser(p.vuser_id, users.filterIsInstance<MTPDuser>().find { it.vid == p.vuser_id }?.vaccess_hash ?: 0)
+                    else -> break
+                }
+                if (dialogs.isEmpty()) break
+            }
+        }
+        return out.values.toList().also { ownPeersCache = it }
+    }
+
+    /**
+     * Deep fallback: scans the media of every unprotected channel the account is in, by empty query, matching
+     * by file id. Finds a copy whose text global search could not match. Bounded by [maxChannels]/[maxPages].
+     */
+    private suspend fun deepScanOwnDialogs(
+        wantId: Long,
+        filter: MTPMessagesFilter,
+        skipBareId: Long,
+        why: MutableMap<String, String>,
+        maxChannels: Int = 60,
+        maxPages: Int = 4,
+    ): MTPMessageMedia? {
+        val peers = ownUnprotectedPeers().filter { it.bareId != skipBareId }.take(maxChannels)
+        why["deep_scan_channels"] = peers.size.toString()
+        var scanned = 0
+        for (peer in peers) {
+            var offId = 0
+            for (page in 1..maxPages) {
+                val r = try {
+                    client.invoke(
+                        MTPmessages_Search(
+                            vpeer = peer.input, vq = "", vfilter = filter,
+                            vmin_date = 0, vmax_date = 0, voffset_id = offId, vadd_offset = 0, vlimit = 100,
+                            vmax_id = 0, vmin_id = 0, vhash = 0,
+                        ),
+                    )
+                } catch (e: RpcError) { break }
+                val list = messagesOf(r).filterIsInstance<MTPDmessage>()
+                scanned += list.size
+                list.firstOrNull { fileIdOf(it.vmedia) == wantId }?.let {
+                    log("deep scan found file $wantId in '${peer.title}'")
+                    why["public_copy"] = "deep: ${peer.title} (${peer.bareId})"
+                    why["deep_scan_messages"] = scanned.toString()
+                    return it.vmedia
+                }
+                val last = list.lastOrNull() ?: break
+                if (list.size < 100) break
+                offId = last.vid
+            }
+        }
+        why["deep_scan_messages"] = scanned.toString()
+        return null
+    }
+
     /**
      * Finds an unprotected copy of the SAME file (matched exactly by document/photo id, not by name) so it can
      * be sent by reference without downloading. Candidates are gathered by text search — in the target channel
@@ -473,6 +571,11 @@ class TakeoutCopier(
                 }
             }
         }
+        // 3. Deep fallback: scan the account's own unprotected channels' media by id (no text).
+        if (deepScan) {
+            deepScanOwnDialogs(wantId, filter, skipBareId = target.bareId, why = why)?.let { return it }
+        }
+
         if (protectedHits.isNotEmpty()) {
             why["protected_copies"] = protectedHits.distinct().joinToString()
             why["reason"] = "only-in-protected-chats"

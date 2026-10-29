@@ -225,6 +225,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var strip by remember { mutableStateOf(initial.stripLinks) }
     var limit by remember { mutableStateOf(initial.perMinuteLimit.toString()) }
     var viaTakeout by remember { mutableStateOf(initial.viaTakeout) }
+    var deepScan by remember { mutableStateOf(initial.deepScan) }
     val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty()
 
     AlertDialog(
@@ -270,6 +271,17 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                             "בפעם הראשונה טלגרם עשוי לבקש לאשר את הייצוא בהודעת שירות.",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = deepScan, onCheckedChange = { deepScan = it })
+                        Text("  🔍 חיפוש עמוק לפי מזהה הקובץ")
+                    }
+                    if (deepScan) {
+                        Text(
+                            "כשקובץ לא נמצא בחיפוש הרגיל, סורק את המדיה של כל הערוצים הלא-מוגנים " +
+                                "שהחשבון חבר בהם ומחפש לפי מזהה הקובץ. איטי — רק מה שבאמת לא קיים בשום מקום פתוח יירד.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
 
                 if (selected.size > 1) {
@@ -307,6 +319,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                         stripLinks = strip,
                         perMinuteLimit = limit.toIntOrNull() ?: 25,
                         viaTakeout = viaTakeout,
+                        deepScan = deepScan,
                     ),
                 )
             }) { Text("שמור") }
