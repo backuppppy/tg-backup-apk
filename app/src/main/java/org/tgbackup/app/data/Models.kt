@@ -42,8 +42,6 @@ data class Job(
     val perMinuteLimit: Int = 25,
     /** Copy without downloading: read through the export (takeout) session and send files by reference. */
     val viaTakeout: Boolean = false,
-    /** When a file isn't found by search, scan the account's own unprotected channels' media by id (slow). */
-    val deepScan: Boolean = false,
 )
 
 @Serializable

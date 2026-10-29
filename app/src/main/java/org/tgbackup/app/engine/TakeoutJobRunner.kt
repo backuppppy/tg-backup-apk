@@ -98,7 +98,6 @@ class TakeoutJobRunner(
                 error("סשן הייצוא לא מחובר עבור ${ac.tag}: ${e.message}")
             }
             val copier = TakeoutCopier(client) { log.info("[${tag}·${ac.tag}] $it") }
-            copier.deepScan = job.deepScan
             val peers = copier.resolve(listOf(bare(source.id), bare(target.id)))
             val src = peers[bare(source.id)] ?: error("ערוץ המקור לא נמצא בסשן הייצוא של ${ac.tag}")
             val dst = peers[bare(target.id)] ?: error("ערוץ היעד לא נמצא בסשן הייצוא של ${ac.tag}")
