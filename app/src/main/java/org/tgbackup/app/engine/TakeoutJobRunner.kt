@@ -25,6 +25,7 @@ import org.tgbackup.app.tg.serverId
 import org.tgbackup.copy.CopyKind
 import org.tgbackup.copy.CopyPeer
 import org.tgbackup.copy.TakeoutCopier
+import org.tgbackup.copy.containsArabic
 import org.tgbackup.mtproto.RpcError
 import org.tgbackup.mtproto.tl.MTPDmessage
 import kotlin.coroutines.coroutineContext
@@ -191,8 +192,9 @@ class TakeoutJobRunner(
                 val id = TakeoutCopier.idOf(m)
                 if (m is MTPDmessage) {
                     val kind = TakeoutCopier.kindOf(m)
-                    if (kind.matches(job.mediaType)) deliver(w, m)
-                    else log.info("[$tag] דילוג על $id (לא תואם לסינון)")
+                    if (!kind.matches(job.mediaType)) log.info("[$tag] דילוג על $id (לא תואם לסינון)")
+                    else if (job.skipArabic && containsArabic(m.vmessage)) log.info("[$tag] דילוג על $id (ערבית)")
+                    else deliver(w, m)
                 }
                 last = id.toLong()
                 store.saveProgress(job.id) { it.copy(lastId = last, viaTakeout = true) }
@@ -300,7 +302,11 @@ class TakeoutJobRunner(
                 awaitNotPaused()
                 val id = TakeoutCopier.idOf(m)
                 if (m is MTPDmessage && TakeoutCopier.kindOf(m).matches(job.mediaType)) {
-                    deliver(w, m)
+                    if (job.skipArabic && containsArabic(m.vmessage)) {
+                        log.info("[$tag·${w.account.tag}] דילוג על $id (ערבית)")
+                    } else {
+                        deliver(w, m)
+                    }
                 } else if (m is MTPDmessage) {
                     log.info("[$tag·${w.account.tag}] דילוג על $id (לא תואם לסינון)")
                 }

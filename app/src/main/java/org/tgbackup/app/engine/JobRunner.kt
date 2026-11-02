@@ -22,6 +22,7 @@ import org.tgbackup.app.tg.AccountClient
 import org.tgbackup.app.tg.SendOutcome
 import org.tgbackup.app.tg.getOrNull
 import org.tgbackup.app.tg.serverId
+import org.tgbackup.copy.containsArabic
 import kotlin.random.Random
 import io.sentry.Sentry
 import io.sentry.SentryLevel
@@ -170,7 +171,7 @@ class JobRunner(
                 }
             }
 
-            val wanted = batch.filter { it.content.matches(job.mediaType) }
+            val wanted = batch.filter { it.content.matches(job.mediaType) && !isArabicSkipped(it) }
             val prefetch = HashMap<Long, Deferred<Result<Copier.Downloaded>>>()
             val window = if (protected) maxOf(2, accounts.size * 2) else 0
 
@@ -183,7 +184,10 @@ class JobRunner(
                     report.phase("מעתיק הודעה ${msg.id.serverId()}")
                     deliver(sender, dst, msg, prefetch.remove(msg.id))
                 } else {
-                    log.info("[$tag] דילוג על ${msg.id.serverId()} (לא תואם לסינון)")
+                    log.info(
+                        "[$tag] דילוג על ${msg.id.serverId()} " +
+                            if (msg.content.matches(job.mediaType)) "(ערבית)" else "(לא תואם לסינון)",
+                    )
                 }
                 last = msg.id.serverId()
                 store.saveProgress(job.id) { it.copy(lastId = last) }
@@ -264,6 +268,13 @@ class JobRunner(
         }
     }
 
+    private fun isArabicSkipped(msg: Message): Boolean {
+        if (!job.skipArabic) return false
+        val c = msg.content
+        val text = if (c is MessageText) c.text.text else c.caption()?.text
+        return text != null && containsArabic(text)
+    }
+
     private suspend fun rangeWorker(i: Int, chats: Pair2, rs: Long, re: Long) {
         val ac = accounts[i]
         var last = maxOf(rs - 1, store.progress(job.id).workerLast[i] ?: 0)
@@ -287,7 +298,8 @@ class JobRunner(
             for (msg in inRange) {
                 awaitNotPaused()
                 if (msg.content.matches(job.mediaType)) {
-                    deliver(ac, chats.target.id, msg, null)
+                    if (isArabicSkipped(msg)) log.info("[$tag · ${ac.tag}] דילוג על ${msg.id.serverId()} (ערבית)")
+                    else deliver(ac, chats.target.id, msg, null)
                 }
                 last = msg.id.serverId()
                 store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last)) }

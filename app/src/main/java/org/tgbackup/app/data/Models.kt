@@ -39,6 +39,8 @@ data class Job(
     /** One-shot: when > 0 the next run starts from this message id (inclusive) and the field is cleared. */
     val startFromId: Long = 0,
     val stripLinks: Boolean = true,
+    /** Skip messages whose text or caption contains Arabic letters. */
+    val skipArabic: Boolean = false,
     val perMinuteLimit: Int = 25,
     /** Copy without downloading: read through the export (takeout) session and send files by reference. */
     val viaTakeout: Boolean = false,

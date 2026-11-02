@@ -223,6 +223,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var selected by remember { mutableStateOf(initial.accountIds.toSet()) }
     var startFrom by remember { mutableStateOf(if (initial.startFromId > 0) initial.startFromId.toString() else "") }
     var strip by remember { mutableStateOf(initial.stripLinks) }
+    var skipArabic by remember { mutableStateOf(initial.skipArabic) }
     var limit by remember { mutableStateOf(initial.perMinuteLimit.toString()) }
     var viaTakeout by remember { mutableStateOf(initial.viaTakeout) }
     val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty()
@@ -291,6 +292,10 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                     Switch(checked = strip, onCheckedChange = { strip = it })
                     Text("  הסר קישורים ותיוגים מהכיתוב")
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = skipArabic, onCheckedChange = { skipArabic = it })
+                    Text("  דלג על הודעות בערבית")
+                }
             }
         },
         confirmButton = {
@@ -305,6 +310,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                         accountIds = accounts.map { it.id }.filter { it in selected },
                         startFromId = startFrom.toLongOrNull() ?: 0,
                         stripLinks = strip,
+                        skipArabic = skipArabic,
                         perMinuteLimit = limit.toIntOrNull() ?: 25,
                         viaTakeout = viaTakeout,
                     ),
