@@ -165,7 +165,7 @@ class JobRunner(
                 if (batch.isEmpty()) {
                     // A run of deleted message ids.
                     last = next
-                    store.saveProgress(job.id) { it.copy(lastId = last) }
+                    store.saveProgress(job.id) { it.copy(lastId = last, viaTakeout = false) }
                     report.position(last)
                     continue
                 }
@@ -190,7 +190,7 @@ class JobRunner(
                     )
                 }
                 last = msg.id.serverId()
-                store.saveProgress(job.id) { it.copy(lastId = last) }
+                store.saveProgress(job.id) { it.copy(lastId = last, viaTakeout = false) }
                 report.position(last)
             }
             prefetch.values.forEach { it.cancel() }
@@ -249,7 +249,7 @@ class JobRunner(
                 }
                 val ws = p.lastId + 1
                 val we = minOf(p.lastId + n * chunk, latest)
-                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap()) }
+                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = false) }
                 p = store.progress(job.id)
                 log.info("[$tag] סבב חדש: הודעות $ws–$we")
             } else {
@@ -263,7 +263,7 @@ class JobRunner(
                 val re = minOf(rs + chunk - 1, wave.waveEnd)
                 async { rangeWorker(i, chats[i], rs, re) }
             }.awaitAll()
-            store.saveProgress(job.id) { it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap()) }
+            store.saveProgress(job.id) { it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), viaTakeout = false) }
             report.position(wave.waveEnd)
         }
     }
@@ -302,7 +302,7 @@ class JobRunner(
                     else deliver(ac, chats.target.id, msg, null)
                 }
                 last = msg.id.serverId()
-                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last)) }
+                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last), viaTakeout = false) }
             }
         }
     }

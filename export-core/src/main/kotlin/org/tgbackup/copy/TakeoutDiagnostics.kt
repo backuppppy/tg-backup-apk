@@ -1,0 +1,44 @@
+package org.tgbackup.copy
+
+/** Pure decisions behind the takeout FAST diagnostics (what gets logged / reported to Sentry). */
+object TakeoutDiagnostics {
+    data class Slice(val index: Int, val start: Long, val end: Long)
+
+    /** Splits wave [ws]..[we] into one slice of up to [chunk] ids per worker; trailing workers may get none. */
+    fun slices(ws: Long, we: Long, workers: Int, chunk: Int): List<Slice> = (0 until workers).mapNotNull { i ->
+        val rs = ws + i.toLong() * chunk
+        if (rs > we) null else Slice(i, rs, minOf(rs + chunk - 1, we))
+    }
+
+    /** A new wave opens past the id right after the last finished one. */
+    fun waveJump(lastId: Long, ws: Long): Boolean = ws > lastId + 1
+
+    /** The worker processed nothing from its slice (last never reached [rs]). */
+    fun sliceSkipped(last: Long, rs: Long): Boolean = last < rs
+
+    /** Saved progress exists although the job is not being started from an explicit id. */
+    fun staleProgress(lastId: Long, waveEnd: Long, startFromId: Long): Boolean =
+        startFromId == 0L && (lastId > 0 || waveEnd > 0)
+
+    /** Saved progress belongs to another source; 0 means unknown (older progress file) and is kept. */
+    fun sourceChanged(savedSourceId: Long, sourceId: Long): Boolean = savedSourceId != 0L && savedSourceId != sourceId
+
+    fun firstFar(firstId: Long, rs: Long, chunk: Int): Boolean = firstId > rs + chunk
+
+    fun outsideSlice(id: Long, rs: Long, re: Long): Boolean = id < rs || id > re
+
+    /** A wave does not start right after the previous one ended; [prevWaveEnd] 0 = unknown. */
+    fun waveGap(prevWaveEnd: Long, ws: Long): Boolean = prevWaveEnd > 0 && ws != prevWaveEnd + 1
+
+    fun incompleteSlice(workerLast: Long, re: Long, endedNormally: Boolean): Boolean = workerLast < re && !endedNormally
+
+    /**
+     * A resumed wave was cut for a different number of workers. More slices than workers is certain;
+     * fewer is only flagged for a full-width wave (a wave capped by the channel's latest id is shorter).
+     */
+    fun accountsChanged(ws: Long, we: Long, chunk: Int, workers: Int): Boolean {
+        val len = we - ws + 1
+        val count = (len + chunk - 1) / chunk
+        return count > workers || (count < workers && len % chunk == 0L)
+    }
+}

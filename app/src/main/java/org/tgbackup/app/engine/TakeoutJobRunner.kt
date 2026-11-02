@@ -25,6 +25,7 @@ import org.tgbackup.app.tg.serverId
 import org.tgbackup.copy.CopyKind
 import org.tgbackup.copy.CopyPeer
 import org.tgbackup.copy.TakeoutCopier
+import org.tgbackup.copy.TakeoutDiagnostics
 import org.tgbackup.copy.containsArabic
 import org.tgbackup.mtproto.RpcError
 import org.tgbackup.mtproto.tl.MTPDmessage
@@ -107,14 +108,23 @@ class TakeoutJobRunner(
 
         try {
             if (job.startFromId > 0) {
-                store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1, viaTakeout = true) }
+                store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1, viaTakeout = true, sourceId = source.id) }
                 clearStartFrom()
                 log.info("[$tag] מתחיל מהודעה ${job.startFromId}")
             } else {
                 val existing = store.progress(job.id)
-                if (!existing.viaTakeout && existing.lastId > 0) {
-                    store.saveProgress(job.id) { Progress(viaTakeout = true) }
+                if (TakeoutDiagnostics.staleProgress(existing.lastId, existing.waveEnd, job.startFromId)) {
+                    reportStale("resume", existing)
+                }
+                if (TakeoutDiagnostics.sourceChanged(existing.sourceId, source.id)) {
+                    store.saveProgress(job.id) { Progress(viaTakeout = true, sourceId = source.id) }
+                    log.info("[$tag] מקור שונה (${existing.sourceId} → ${source.id}) — מאפס progress ומתחיל מההתחלה")
+                    reportStale("source-changed", existing)
+                } else if (!existing.viaTakeout && existing.lastId > 0) {
+                    store.saveProgress(job.id) { Progress(viaTakeout = true, sourceId = source.id) }
                     log.info("[$tag] מאפס progress ממצב רגיל (lastId=${existing.lastId}) — מתחיל מההתחלה")
+                } else if (existing.sourceId == 0L) {
+                    store.saveProgress(job.id) { it.copy(sourceId = source.id) }
                 }
             }
 
@@ -123,7 +133,10 @@ class TakeoutJobRunner(
                 "[$tag] פעיל בלי הורדה (סשן ייצוא): ${workers[0].src.title} → ${workers[0].dst.title} | " +
                     "${job.mediaType.label} | ${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
             )
-            if (fast) runFast(workers) else loop(workers[0])
+            if (fast) {
+                reportFastStart(workers)
+                runFast(workers)
+            } else loop(workers[0])
         } finally {
             withContext(NonCancellable) { workers.forEach { it.copier.finish() } }
         }
@@ -207,7 +220,8 @@ class TakeoutJobRunner(
 
     private suspend fun runFast(workers: List<Worker>) = coroutineScope {
         val n = workers.size
-        val chunk = 25
+        val chunk = FAST_CHUNK
+        var prevWaveEnd = 0L
         while (true) {
             coroutineContext.ensureActive()
             awaitNotPaused()
@@ -247,20 +261,44 @@ class TakeoutJobRunner(
                 val ws = next ?: (p.lastId + 1)
                 if (ws > p.lastId + 1) log.info("[$tag] מדלג על IDs ריקים ${p.lastId + 1}–${ws - 1}")
                 val we = minOf(ws + n * chunk - 1, latest)
+                val jump = TakeoutDiagnostics.waveJump(p.lastId, ws)
+                if (jump) {
+                    problem(
+                        "wave-jump|${ws / 100_000}", "wave opened past the last finished id", SentryLevel.WARNING,
+                        mapOf("last_id" to p.lastId.toString(), "ws" to ws.toString(), "we" to we.toString(), "latest" to latest.toString()),
+                    )
+                }
+                if (TakeoutDiagnostics.waveGap(prevWaveEnd, ws)) {
+                    anomaly("wave-gap", "", ws, we, 0, p.lastId, 0, 0, mapOf("wave_jump" to jump.toString(), "prev_wave_end" to prevWaveEnd.toString()))
+                }
                 store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = true) }
                 p = store.progress(job.id)
                 log.info("[$tag] סבב חדש: הודעות $ws–$we")
             } else {
                 log.info("[$tag] ממשיך סבב קיים: ${p.waveStart}–${p.waveEnd}")
+                if (TakeoutDiagnostics.accountsChanged(p.waveStart, p.waveEnd, chunk, n)) {
+                    anomaly(
+                        "accounts-changed", "", p.waveStart, p.waveEnd, 0, p.lastId, 0, 0,
+                        mapOf("workers" to n.toString(), "slices" to ((p.waveEnd - p.waveStart + chunk) / chunk).toString()),
+                    )
+                }
             }
             val wave = p
             report.phase("סבב ${wave.waveStart}–${wave.waveEnd}")
-            (0 until n).mapNotNull { i ->
-                val rs = wave.waveStart + i * chunk
-                if (rs > wave.waveEnd) return@mapNotNull null
-                val re = minOf(rs + chunk - 1, wave.waveEnd)
-                async { rangeWorker(i, workers[i], rs, re) }
+            val slices = TakeoutDiagnostics.slices(wave.waveStart, wave.waveEnd, n, chunk)
+            log.info(
+                "[$tag] סבב ${wave.waveStart}–${wave.waveEnd} | " +
+                    slices.joinToString(", ") { "${workers[it.index].account.tag}: ${it.start}–${it.end}" },
+            )
+            val results = slices.map { sl ->
+                async { sl to rangeWorker(sl.index, workers[sl.index], sl.start, sl.end) }
             }.awaitAll()
+            for ((sl, r) in results) {
+                if (TakeoutDiagnostics.incompleteSlice(r.last, sl.end, r.endedNormally)) {
+                    anomaly("incomplete-slice", workers[sl.index].account.tag, sl.start, sl.end, r.firstId, r.last, r.last, r.sent)
+                }
+            }
+            prevWaveEnd = wave.waveEnd
             store.saveProgress(job.id) {
                 it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), viaTakeout = true)
             }
@@ -268,8 +306,14 @@ class TakeoutJobRunner(
         }
     }
 
-    private suspend fun rangeWorker(i: Int, w: Worker, rs: Long, re: Long) {
+    /** What a slice worker did: its last id, the first id it received (0 = none), messages processed, and whether the loop ended by reaching [re]. */
+    private class SliceResult(val last: Long, val firstId: Long, val sent: Int, val endedNormally: Boolean)
+
+    private suspend fun rangeWorker(i: Int, w: Worker, rs: Long, re: Long): SliceResult {
         var last = maxOf(rs - 1, store.progress(job.id).workerLast[i] ?: 0)
+        var firstId = 0L
+        var sent = 0
+        val acc = w.account.tag
         while (last < re) {
             awaitNotPaused()
             val batch = try {
@@ -294,13 +338,35 @@ class TakeoutJobRunner(
                 delay(15_000)
                 continue
             }
-            if (batch.isEmpty()) break  // MTProto skips deleted ids natively; empty = range exhausted
+            if (firstId == 0L && batch.isNotEmpty()) {
+                firstId = TakeoutCopier.idOf(batch.first()).toLong()
+                log.info("[$tag·$acc] הודעה ראשונה שהתקבלה: $firstId (פרוסה $rs–$re)")
+                if (TakeoutDiagnostics.firstFar(firstId, rs, FAST_CHUNK)) {
+                    anomaly("first-far", acc, rs, re, firstId, last, last, sent)
+                }
+            }
             val inRange = batch.filter { TakeoutCopier.idOf(it) <= re.toInt() }
-            if (inRange.isEmpty()) break
+            if (batch.isEmpty() || inRange.isEmpty()) {  // MTProto skips deleted ids natively; empty = range exhausted
+                if (TakeoutDiagnostics.sliceSkipped(last, rs)) {
+                    problem(
+                        "slice-skipped|$acc|${rs / 100_000}", "worker got nothing from its slice", SentryLevel.INFO,
+                        mapOf(
+                            "account" to acc, "rs" to rs.toString(), "re" to re.toString(), "last" to last.toString(),
+                            "batch_size" to batch.size.toString(),
+                            "batch_first" to (batch.firstOrNull()?.let { TakeoutCopier.idOf(it) } ?: 0).toString(),
+                            "batch_last" to (batch.lastOrNull()?.let { TakeoutCopier.idOf(it) } ?: 0).toString(),
+                        ),
+                    )
+                }
+                break
+            }
             for (m in inRange) {
                 coroutineContext.ensureActive()
                 awaitNotPaused()
                 val id = TakeoutCopier.idOf(m)
+                if (TakeoutDiagnostics.outsideSlice(id.toLong(), rs, re)) {
+                    anomaly("outside-slice", acc, rs, re, firstId, last, last, sent)
+                }
                 if (m is MTPDmessage && TakeoutCopier.kindOf(m).matches(job.mediaType)) {
                     if (job.skipArabic && containsArabic(m.vmessage)) {
                         log.info("[$tag·${w.account.tag}] דילוג על $id (ערבית)")
@@ -311,9 +377,11 @@ class TakeoutJobRunner(
                     log.info("[$tag·${w.account.tag}] דילוג על $id (לא תואם לסינון)")
                 }
                 last = id.toLong()
+                sent++
                 store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last), viaTakeout = true) }
             }
         }
+        return SliceResult(last, firstId, sent, last >= re)
     }
 
     // ── Delivery ───────────────────────────────────────────────────────────────
@@ -367,6 +435,51 @@ class TakeoutJobRunner(
             s.setTag("takeout", key.substringBefore('|'))
             extras.forEach { (k, v) -> s.setExtra(k, v) }
         }
+    }
+
+    private fun anomaly(
+        type: String, account: String, rs: Long, re: Long, firstId: Long, lastId: Long, workerLast: Long, sent: Int,
+        more: Map<String, String> = emptyMap(),
+    ) {
+        problem(
+            "order-anomaly|$type", "order anomaly: $type", SentryLevel.WARNING,
+            mapOf(
+                "type" to type, "account" to account, "rs" to rs.toString(), "re" to re.toString(),
+                "first_id" to firstId.toString(), "last_id" to lastId.toString(),
+                "worker_last" to workerLast.toString(), "sent_count" to sent.toString(),
+            ) + more,
+        )
+    }
+
+    private fun reportStale(reason: String, p: Progress) {
+        problem(
+            "stale-progress|$reason|${p.lastId}", "saved progress on start ($reason)", SentryLevel.WARNING,
+            mapOf(
+                "last_id" to p.lastId.toString(), "wave_start" to p.waveStart.toString(), "wave_end" to p.waveEnd.toString(),
+                "worker_last" to p.workerLast.toString(), "via_takeout" to p.viaTakeout.toString(), "mode" to job.mode.name,
+                "saved_source_id" to p.sourceId.toString(), "source_id" to sourceChatId.toString(), "reason" to reason,
+            ),
+        )
+    }
+
+    /** One INFO event per run: the key carries the start time, one short line per run in the once-per-version file. */
+    private suspend fun reportFastStart(workers: List<Worker>) {
+        val p = store.progress(job.id)
+        val latest = runCatching { workers[0].copier.latestId(workers[0].src).toLong() }.getOrDefault(0L)
+        val ws = if (p.waveEnd > p.lastId) p.waveStart else p.lastId + 1
+        val we = if (p.waveEnd > p.lastId) p.waveEnd else ws + workers.size * FAST_CHUNK - 1
+        val slices = TakeoutDiagnostics.slices(ws, we, workers.size, FAST_CHUNK)
+        problem(
+            "fast-start|${System.currentTimeMillis() / 1000}", "FAST multi-account run started", SentryLevel.INFO,
+            mapOf(
+                "accounts" to workers.joinToString(",") { it.account.tag },
+                "first_wave" to "$ws-$we",
+                "slices" to slices.joinToString(",") { "${workers[it.index].account.tag}:${it.start}-${it.end}" },
+                "latest" to latest.toString(),
+                "last_id" to p.lastId.toString(), "wave_start" to p.waveStart.toString(), "wave_end" to p.waveEnd.toString(),
+                "worker_last" to p.workerLast.toString(), "via_takeout" to p.viaTakeout.toString(), "mode" to job.mode.name,
+            ),
+        )
     }
 
     /** A fallback to download+upload goes to Sentry once per job, reason and media kind. */
@@ -494,5 +607,6 @@ class TakeoutJobRunner(
 
     private companion object {
         const val CHANNEL_SHIFT = 1_000_000_000_000L
+        const val FAST_CHUNK = 25
     }
 }
