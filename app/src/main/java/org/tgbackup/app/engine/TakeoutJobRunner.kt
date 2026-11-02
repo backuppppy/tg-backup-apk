@@ -115,7 +115,7 @@ class TakeoutJobRunner(
                 val existing = store.progress(job.id)
                 val sourceChanged = TakeoutDiagnostics.sourceChanged(existing.sourceId, source.id)
                 if (TakeoutDiagnostics.staleProgress(existing.lastId, existing.waveEnd, job.startFromId)) {
-                    reportStale(if (sourceChanged) "source-changed" else "resume", existing)
+                    reportStale(TakeoutDiagnostics.staleReason(sourceChanged, existing.viaTakeout, existing.lastId), existing)
                 }
                 if (sourceChanged) {
                     store.saveProgress(job.id) { Progress(viaTakeout = true, sourceId = source.id) }
@@ -265,12 +265,34 @@ class TakeoutJobRunner(
                 latestKnown = latest
                 val jump = TakeoutDiagnostics.waveJump(p.lastId, ws)
                 if (jump) {
+                    // Deleted, or just not visible to this account? Ask another account and read the first id directly.
+                    val probe = mutableMapOf<String, String>()
+                    if (TakeoutDiagnostics.largeJump(p.lastId, ws, chunk)) {
+                        val other = workers.getOrNull(1)
+                        if (other != null) {
+                            try {
+                                probe["first_other_account"] = other.copier.historyAfter(other.src, p.lastId.toInt(), 1)
+                                    .firstOrNull()?.let { TakeoutCopier.idOf(it).toString() } ?: "none"
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                probe["first_other_account_error"] = e.message ?: e.javaClass.simpleName
+                            }
+                        }
+                        try {
+                            probe["by_id_exists"] = (workers[0].copier.reload(workers[0].src, (p.lastId + 1).toInt()) != null).toString()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            probe["by_id_error"] = e.message ?: e.javaClass.simpleName
+                        }
+                    }
                     problem(
                         "wave-jump|${ws / 100_000}", "wave opened past the last finished id", SentryLevel.WARNING,
                         mapOf(
                             "last_id" to p.lastId.toString(), "ws" to ws.toString(), "we" to we.toString(), "latest" to latest.toString(),
                             "prev_wave_end" to prevWaveEnd.toString(),
-                        ),
+                        ) + probe,
                     )
                 }
                 if (TakeoutDiagnostics.waveGap(prevWaveEnd, ws) && !jump) {
@@ -361,7 +383,7 @@ class TakeoutJobRunner(
                 firstId = TakeoutCopier.idOf(batch.first()).toLong()
                 log.info("[$tag·$acc] הודעה ראשונה שהתקבלה: $firstId (פרוסה $rs–$re)")
                 if (TakeoutDiagnostics.firstFar(firstId, rs, FAST_CHUNK)) {
-                    anomaly("first-far", acc, rs, re, firstId, last, last, sent, mapOf("resumed" to waveResumed.toString()))
+                    anomaly("first-far|${rs / 100_000}", acc, rs, re, firstId, last, last, sent, mapOf("resumed" to waveResumed.toString()))
                 }
             }
             val inRange = batch.filter { TakeoutCopier.idOf(it) <= re.toInt() }
@@ -457,12 +479,14 @@ class TakeoutJobRunner(
         }
     }
 
+    /** [type] may carry a key suffix after '|' (e.g. a bucket); the reported type is the part before it. */
     private fun anomaly(
-        type: String, account: String, rs: Long, re: Long, firstId: Long, lastId: Long, workerLast: Long, sent: Int,
+        typeKey: String, account: String, rs: Long, re: Long, firstId: Long, lastId: Long, workerLast: Long, sent: Int,
         more: Map<String, String> = emptyMap(),
     ) {
+        val type = typeKey.substringBefore('|')
         problem(
-            "order-anomaly|$type", "order anomaly: $type", SentryLevel.WARNING,
+            "order-anomaly|$typeKey", "order anomaly: $type", SentryLevel.WARNING,
             mapOf(
                 "type" to type, "account" to account, "rs" to rs.toString(), "re" to re.toString(),
                 "first_id" to firstId.toString(), "last_id" to lastId.toString(),
@@ -473,7 +497,8 @@ class TakeoutJobRunner(
 
     private fun reportStale(reason: String, p: Progress) {
         problem(
-            "stale-progress|$reason|${p.lastId}", "saved progress on start ($reason)", SentryLevel.WARNING,
+            "stale-progress|$reason|${p.lastId}", "saved progress on start ($reason)",
+            if (reason == "resume") SentryLevel.INFO else SentryLevel.WARNING,
             mapOf(
                 "last_id" to p.lastId.toString(), "wave_start" to p.waveStart.toString(), "wave_end" to p.waveEnd.toString(),
                 "worker_last" to p.workerLast.toString(), "via_takeout" to p.viaTakeout.toString(), "mode" to job.mode.name,
@@ -482,12 +507,12 @@ class TakeoutJobRunner(
         )
     }
 
-    /** One INFO event per run, sent when the first wave is opened or resumed. The key carries the start time: one short line per run in the once-per-version file. */
+    /** One INFO event per run, sent when the first wave is opened or resumed. The key carries the wave start and last id, so a restart on the same position is not re-sent. */
     private fun reportFastStart(
         workers: List<Worker>, wave: Progress, slices: List<TakeoutDiagnostics.Slice>, latest: Long, latestError: String, resumed: Boolean,
     ) {
         problem(
-            "fast-start|${System.currentTimeMillis() / 1000}", "FAST multi-account run started", SentryLevel.INFO,
+            "fast-start|${wave.waveStart}|${wave.lastId}", "FAST multi-account run started", SentryLevel.INFO,
             mapOf(
                 "accounts" to workers.joinToString(",") { it.account.tag },
                 "first_wave" to "${wave.waveStart}-${wave.waveEnd}",

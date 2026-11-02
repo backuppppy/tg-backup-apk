@@ -41,4 +41,14 @@ object TakeoutDiagnostics {
     /** A resumed wave was cut for more slices than there are workers (fewer is indistinguishable from a wave capped by latest). */
     fun accountsChanged(ws: Long, we: Long, chunk: Int, workers: Int): Boolean =
         (we - ws + chunk) / chunk > workers
+
+    /** A jump too big to be a few deleted ids: worth asking another account and reading the first id directly. */
+    fun largeJump(lastId: Long, ws: Long, chunk: Int): Boolean = lastId == 0L || ws - lastId > chunk
+
+    /** Why saved progress is reported on start. */
+    fun staleReason(sourceChanged: Boolean, viaTakeout: Boolean, lastId: Long): String = when {
+        sourceChanged -> "source-changed"
+        !viaTakeout && lastId > 0 -> "mode-reset"
+        else -> "resume"
+    }
 }

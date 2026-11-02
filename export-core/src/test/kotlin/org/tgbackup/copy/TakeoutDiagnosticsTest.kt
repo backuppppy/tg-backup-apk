@@ -68,4 +68,15 @@ class TakeoutDiagnosticsTest {
         assertFalse(TakeoutDiagnostics.accountsChanged(100, 130, 25, 3))
         assertFalse(TakeoutDiagnostics.accountsChanged(100, 149, 25, 3))
     }
+    @Test fun largeJump() {
+        assertTrue(TakeoutDiagnostics.largeJump(0, 3, 25))
+        assertTrue(TakeoutDiagnostics.largeJump(100, 126, 25))
+        assertFalse(TakeoutDiagnostics.largeJump(100, 125, 25))
+    }
+    @Test fun staleReason() {
+        assertEquals("source-changed", TakeoutDiagnostics.staleReason(true, true, 5))
+        assertEquals("mode-reset", TakeoutDiagnostics.staleReason(false, false, 5))
+        assertEquals("resume", TakeoutDiagnostics.staleReason(false, true, 5))
+        assertEquals("resume", TakeoutDiagnostics.staleReason(false, false, 0))
+    }
 }
