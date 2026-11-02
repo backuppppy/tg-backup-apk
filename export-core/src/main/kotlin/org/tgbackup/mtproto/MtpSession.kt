@@ -56,13 +56,18 @@ internal class MtpSession(
     private val clock: MtpClock,
     private val app: AppInfo,
     private val log: (String) -> Unit,
+    private val onBadMsgStorm: (BadMsgStorm) -> Unit = {},
 ) {
     private class Pending(
         val body: ByteArray,
         val parse: (TlReader) -> Any?,
         val result: CompletableDeferred<Any?>,
         val wrapped: Boolean,
+        val createdAt: Long = System.currentTimeMillis(),
+        @Volatile var resends: Int = 0,
     )
+
+    private val badMsgStorms = BadMsgStormDetector()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pending = ConcurrentHashMap<Long, Pending>()
@@ -246,12 +251,14 @@ internal class MtpSession(
         val old = pending.keys.toList()
         for (id in old) {
             val p = pending.remove(id) ?: continue
+            p.resends++
             send(p)
         }
     }
 
     private suspend fun resend(badMsgId: Long) {
         val p = pending.remove(badMsgId) ?: return
+        p.resends++
         send(p)
     }
 
@@ -315,7 +322,9 @@ internal class MtpSession(
                 val badId = r.long()
                 r.int()
                 val code = r.int()
-                log("DC${dc.id}: bad_msg_notification $code")
+                val verdict = badMsgStorms.record(code)
+                if (verdict is BadMsgStormDetector.Verdict.Log) log("DC${dc.id}: bad_msg_notification $code")
+                val offsetBefore = clock.offsetMs
                 when (code) {
                     16, 17 -> {
                         clock.offsetMs = (msgId ushr 32) * 1000 - System.currentTimeMillis()
@@ -331,6 +340,7 @@ internal class MtpSession(
                     }
                     else -> pending.remove(badId)?.result?.completeExceptionally(MtpException("bad_msg_notification $code"))
                 }
+                if (verdict is BadMsgStormDetector.Verdict.Storm) reportStorm(code, verdict, offsetBefore)
             }
             0x9ec20908.toInt() -> { // new_session_created
                 r.long()
@@ -341,6 +351,27 @@ internal class MtpSession(
                 // Acks, pongs, detailed infos and updates need no action here.
                 if (id == 0x62d6b459 || id == 0x347773c5 || id == 0x276d3ec6 || id == 0x809db6df.toInt()) return
             }
+        }
+    }
+
+    private fun reportStorm(code: Int, storm: BadMsgStormDetector.Verdict.Storm, offsetBefore: Long) {
+        log("DC${dc.id}: bad_msg_notification $code x${storm.count} in ${storm.spanMs / 1000}s")
+        runCatching {
+            val now = System.currentTimeMillis()
+            val all = pending.values.toList()
+            onBadMsgStorm(
+                BadMsgStorm(
+                    dcId = dc.id,
+                    code = code,
+                    count = storm.count,
+                    windowMs = storm.spanMs,
+                    offsetBeforeMs = offsetBefore,
+                    offsetAfterMs = clock.offsetMs,
+                    pendingCount = all.size,
+                    oldestRequestAgeMs = all.minOfOrNull { it.createdAt }?.let { now - it } ?: 0L,
+                    maxResends = all.maxOfOrNull { it.resends } ?: 0,
+                ),
+            )
         }
     }
 

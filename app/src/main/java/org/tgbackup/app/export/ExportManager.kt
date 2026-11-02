@@ -3,6 +3,7 @@ package org.tgbackup.app.export
 import android.os.Build
 import android.os.Environment as AndroidEnvironment
 import dev.g000sha256.tdl.TdlResult
+import io.sentry.SentryLevel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,7 @@ import kotlinx.serialization.json.Json
 import org.tgbackup.app.BuildConfig
 import org.tgbackup.app.data.Account
 import org.tgbackup.app.engine.LogBus
+import org.tgbackup.app.engine.SentryOnce
 import org.tgbackup.app.tg.AccountManager
 import org.tgbackup.app.tg.getOrNull
 import org.tgbackup.export.ChatEntry
@@ -33,6 +35,7 @@ import org.tgbackup.export.data.ExportTimeZone
 import org.tgbackup.export.output.Format
 import org.tgbackup.copy.TakeoutCopier
 import org.tgbackup.mtproto.AppInfo
+import org.tgbackup.mtproto.BadMsgStorm
 import org.tgbackup.mtproto.MtpClient
 import org.tgbackup.mtproto.MtpLogin
 import org.tgbackup.mtproto.MtpStorage
@@ -103,6 +106,25 @@ class ExportManager(
 
     fun exportPath(): String = _prefs.value.path.ifBlank { defaultPath() }
 
+    private fun reportBadMsgStorm(accountId: String, s: BadMsgStorm) {
+        SentryOnce.message(
+            "bad-msg-storm|$accountId|${s.dcId}|${s.code}",
+            "MTProto bad_msg_notification storm (code ${s.code})",
+            SentryLevel.WARNING,
+        ) { scope ->
+            scope.setTag("dc", s.dcId.toString())
+            scope.setTag("code", s.code.toString())
+            scope.setTag("account", accountId.toString())
+            scope.setExtra("count", s.count.toString())
+            scope.setExtra("windowMs", s.windowMs.toString())
+            scope.setExtra("offsetBeforeMs", s.offsetBeforeMs.toString())
+            scope.setExtra("offsetAfterMs", s.offsetAfterMs.toString())
+            scope.setExtra("pendingCount", s.pendingCount.toString())
+            scope.setExtra("oldestRequestAgeMs", s.oldestRequestAgeMs.toString())
+            scope.setExtra("maxResends", s.maxResends.toString())
+        }
+    }
+
     private suspend fun client(account: Account): MtpClient = lock.withLock {
         clients[account.id]?.let { return it }
         val storage = MtpStorage(File(rootDir, "export/${account.id}/session.properties"))
@@ -112,7 +134,10 @@ class ExportManager(
             systemVersion = "Android ${Build.VERSION.RELEASE}",
             appVersion = "${BuildConfig.VERSION_NAME} (export)",
         )
-        val client = MtpClient(storage, app, account.apiHash, { log.info("[export] $it") })
+        val client = MtpClient(
+            storage, app, account.apiHash, { log.info("[export] $it") },
+            onBadMsgStorm = { s -> reportBadMsgStorm(account.id, s) },
+        )
         clients[account.id] = client
         client
     }

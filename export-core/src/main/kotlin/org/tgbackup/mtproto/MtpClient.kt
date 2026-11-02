@@ -69,6 +69,8 @@ class MtpClient(
     private val log: (String) -> Unit,
     /** Called while waiting out a FLOOD_WAIT, with the number of seconds. */
     var onFloodWait: (Int) -> Unit = {},
+    /** Called once when a burst of bad_msg_notification starts; observation only. */
+    private val onBadMsgStorm: (BadMsgStorm) -> Unit = {},
 ) {
     enum class Kind { Main, Media }
 
@@ -119,7 +121,7 @@ class MtpClient(
                 storage.setAuthKey(dc, key)
                 storage.setAuthorized(dc, false)
             }
-            val s = MtpSession(address(dc, kind), AuthKey(key), salt, clock, app, log)
+            val s = MtpSession(address(dc, kind), AuthKey(key), salt, clock, app, log, onBadMsgStorm)
             sessions[dc to kind] = s
             return s
         }
