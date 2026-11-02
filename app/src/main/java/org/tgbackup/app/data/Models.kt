@@ -44,8 +44,6 @@ data class Job(
     val perMinuteLimit: Int = 25,
     /** Copy without downloading: read through the export (takeout) session and send files by reference. */
     val viaTakeout: Boolean = false,
-    /** TDLib chat id of the source this progress belongs to; 0 = unknown (progress written before this field existed). */
-    val sourceId: Long = 0,
 )
 
 @Serializable

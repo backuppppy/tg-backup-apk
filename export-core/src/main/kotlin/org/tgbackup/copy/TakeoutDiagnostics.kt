@@ -33,12 +33,12 @@ object TakeoutDiagnostics {
     fun incompleteSlice(workerLast: Long, re: Long, endedNormally: Boolean): Boolean = workerLast < re && !endedNormally
 
     /**
-     * A resumed wave was cut for a different number of workers. More slices than workers is certain;
-     * fewer is only flagged for a full-width wave (a wave capped by the channel's latest id is shorter).
+     * How a slice worker's loop stopped: reaching [re] is normal; so is a non-empty batch that lies past [re]
+     * (the slice's tail is empty); an empty batch before [re] is not.
      */
-    fun accountsChanged(ws: Long, we: Long, chunk: Int, workers: Int): Boolean {
-        val len = we - ws + 1
-        val count = (len + chunk - 1) / chunk
-        return count > workers || (count < workers && len % chunk == 0L)
-    }
+    fun endedNormally(last: Long, re: Long, batchEmpty: Boolean): Boolean = last >= re || !batchEmpty
+
+    /** A resumed wave was cut for more slices than there are workers (fewer is indistinguishable from a wave capped by latest). */
+    fun accountsChanged(ws: Long, we: Long, chunk: Int, workers: Int): Boolean =
+        (we - ws + chunk) / chunk > workers
 }

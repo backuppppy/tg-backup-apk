@@ -55,12 +55,17 @@ class TakeoutDiagnosticsTest {
     @Test fun incompleteSlice() {
         assertTrue(TakeoutDiagnostics.incompleteSlice(workerLast = 110, re = 124, endedNormally = false))
         assertFalse(TakeoutDiagnostics.incompleteSlice(workerLast = 110, re = 124, endedNormally = true))
-        assertFalse(TakeoutDiagnostics.incompleteSlice(workerLast = 124, re = 124, endedNormally = false))
+        assertFalse(TakeoutDiagnostics.incompleteSlice(workerLast = 124, re = 124, endedNormally = true))
     }
-    @Test fun accountsChanged() {
+    @Test fun endedNormally() {
+        assertTrue(TakeoutDiagnostics.endedNormally(last = 124, re = 124, batchEmpty = false))
+        assertTrue(TakeoutDiagnostics.endedNormally(last = 110, re = 124, batchEmpty = false))  // batch past re: deleted tail
+        assertFalse(TakeoutDiagnostics.endedNormally(last = 110, re = 124, batchEmpty = true))
+    }
+    @Test fun accountsChangedOnlyWhenMoreSlicesThanWorkers() {
         assertFalse(TakeoutDiagnostics.accountsChanged(100, 174, 25, 3))
         assertTrue(TakeoutDiagnostics.accountsChanged(100, 174, 25, 2))
         assertFalse(TakeoutDiagnostics.accountsChanged(100, 130, 25, 3))
-        assertTrue(TakeoutDiagnostics.accountsChanged(100, 149, 25, 3))
+        assertFalse(TakeoutDiagnostics.accountsChanged(100, 149, 25, 3))
     }
 }
