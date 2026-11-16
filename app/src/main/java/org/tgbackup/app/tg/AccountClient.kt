@@ -22,6 +22,7 @@ import dev.g000sha256.tdl.dto.File as TdFile
 import dev.g000sha256.tdl.dto.InputMessageContent
 import dev.g000sha256.tdl.dto.Message
 import dev.g000sha256.tdl.dto.UpdateAuthorizationState
+import dev.g000sha256.tdl.dto.UpdateChatHasProtectedContent
 import dev.g000sha256.tdl.dto.UpdateMessageSendFailed
 import dev.g000sha256.tdl.dto.UpdateMessageSendSucceeded
 import kotlinx.coroutines.CompletableDeferred
@@ -29,13 +30,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import org.tgbackup.app.BuildConfig
 import org.tgbackup.app.data.Account
@@ -59,6 +66,9 @@ sealed class SendOutcome {
     data class Sent(val messageId: Long) : SendOutcome()
     data class Failed(val code: Int, val message: String, val retryAfterSec: Int) : SendOutcome()
 }
+
+/** Telegram's notice that [chatId]'s forwarding protection is now [isProtected]. */
+data class ProtectionNotice(val chatId: Long, val isProtected: Boolean)
 
 fun <T> TdlResult<T>.getOrNull(): T? = (this as? TdlResult.Success)?.result
 fun TdlResult<*>.errorText(): String? = (this as? TdlResult.Failure)?.let { "${it.code}: ${it.message}" }
@@ -85,6 +95,11 @@ class AccountClient(
     private val earlySends = ConcurrentHashMap<Long, SendOutcome>()
     private val chatCache = ConcurrentHashMap<String, Chat>()
 
+    private val _protectionNotices = MutableSharedFlow<ProtectionNotice>(extraBufferCapacity = 64)
+
+    /** Every change of a chat's forwarding protection, as TDLib reports it (a running job follows its source's). */
+    val protectionNotices: SharedFlow<ProtectionNotice> = _protectionNotices.asSharedFlow()
+
     val tag: String get() = account.name.ifBlank { account.phone }
 
     fun start() {
@@ -93,6 +108,8 @@ class AccountClient(
             client.allUpdates.collect { update ->
                 when (update) {
                     is UpdateAuthorizationState -> onAuthState(update.authorizationState)
+                    is UpdateChatHasProtectedContent ->
+                        _protectionNotices.tryEmit(ProtectionNotice(update.chatId, update.hasProtectedContent))
                     is UpdateMessageSendSucceeded -> completeSend(update.oldMessageId, SendOutcome.Sent(update.message.id))
                     is UpdateMessageSendFailed -> completeSend(
                         update.oldMessageId,
@@ -195,7 +212,12 @@ class AccountClient(
      */
     suspend fun resolveChat(raw: String): Result<Chat> {
         val input = raw.trim()
-        chatCache[input]?.let { return Result.success(it) }
+        // The cache keeps how [raw] maps to a chat; the chat itself is read again, so its flags (protection) are current.
+        chatCache[input]?.let { cached ->
+            val fresh = client.getChat(cached.id).getOrNull() ?: cached
+            chatCache[input] = fresh
+            return Result.success(fresh)
+        }
         val chat = findChat(input)
         if (chat != null) chatCache[input] = chat
         return chat?.let { Result.success(it) }
@@ -319,8 +341,21 @@ class AccountClient(
             pendingSends.remove(tmp.id)
             return early
         }
-        return withTimeoutOrNull(3.hours) { waiter.await() }
-            ?: SendOutcome.Failed(-1, "timeout", 0).also { pendingSends.remove(tmp.id) }
+        // A logged-out or closed account never completes the send: that ends the wait too (its TDLib queue is gone,
+        // so the message will not go out later). A plain timeout is different: TDLib may still send it.
+        return withTimeoutOrNull(3.hours) {
+            coroutineScope {
+                val lost = async {
+                    auth.first { it !is AuthUi.Ready }
+                    SendOutcome.Failed(SEND_DISCONNECTED, "account disconnected", 0)
+                }
+                select<SendOutcome> {
+                    waiter.onAwait { it }
+                    lost.onAwait { it }
+                }.also { lost.cancel() }
+            }
+        }?.also { if (it is SendOutcome.Failed) pendingSends.remove(tmp.id) }
+            ?: SendOutcome.Failed(SEND_TIMEOUT, "timeout", 0).also { pendingSends.remove(tmp.id) }
     }
 
     private fun completeSend(oldId: Long, outcome: SendOutcome) {
@@ -345,6 +380,12 @@ class AccountClient(
     }
 
     companion object {
+        /** [SendOutcome.Failed] code: no answer for 3 hours; TDLib may still send the message (never resend it). */
+        const val SEND_TIMEOUT = -1
+
+        /** [SendOutcome.Failed] code: the account logged out or closed while the message was waiting (not sent). */
+        const val SEND_DISCONNECTED = -2
+
         private const val CHANNEL_SHIFT = 1_000_000_000_000L
         private val retryRegex = Regex("""retry after (\d+)""", RegexOption.IGNORE_CASE)
 

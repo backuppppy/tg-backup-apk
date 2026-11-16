@@ -10,6 +10,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -54,11 +57,31 @@ class RateLimiter(private val perMinute: Int) {
     }
 }
 
+/** How one message's delivery ended (see JobRunner.deliver). */
+sealed interface Delivery {
+    data object Sent : Delivery
+
+    /** Not sent on purpose: nothing to send, or a kind a protected source cannot give. */
+    data object Skipped : Delivery
+
+    /** A FloodWait handed back to the caller (hand-off mode), instead of waiting it out here. */
+    data class FloodWait(val seconds: Int) : Delivery
+
+    /** Every retry on this account was refused. */
+    data object Failed : Delivery
+
+    /** No answer from Telegram: the message may still go out, so it is never sent again (no duplicates). */
+    data object Unknown : Delivery
+}
+
 /** Callbacks from a runner to the UI-facing job status. */
 interface JobReporter {
     fun phase(text: String)
     fun position(lastId: Long)
     fun copied()
+
+    /** The source's newest message is [id] (server id), as read by latestServerId. */
+    fun latest(id: Long) {}
 
     /** A message was sent to [chatId]; [serverId] is its id as shown in t.me links. */
     fun delivered(chatId: Long, serverId: Long)
@@ -80,7 +103,22 @@ class JobRunner(
     private val clearStartFrom: () -> Unit,
 ) {
     private val tag = job.name.ifBlank { job.id }
-    private var protected = false
+    private val protection = SourceProtection(false)
+
+    /** The source as resolved by the first account, for the card's protection line. */
+    @Volatile private var sourceId = 0L
+    @Volatile private var sourceTitle = ""
+
+    /** Fast mode: until when an account is stuck (a long FloodWait); it skips its slice in the waves until then. */
+    private val stuckUntil = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+
+    /** Prefetched files nobody sends: each is awaited (TDLib finishes it anyway) and its file deleted. */
+    private val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private companion object {
+        /** Fast mode: a FloodWait longer than this hands the rest of the account's slice to a free account. */
+        const val FAST_HAND_OFF_SEC = 60
+    }
     private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
 
     private class Pair2(val source: Chat, val target: Chat)
@@ -102,9 +140,25 @@ class JobRunner(
         // An opened chat keeps its loaded messages in TDLib memory, which copying relies on.
         accounts.forEachIndexed { i, ac -> ac.client.openChat(chats[i].source.id) }
         val source = chats[0].source
-        protected = source.hasProtectedContent
-        report.sourceInfo(source.id, source.title, protected)
-        if (protected) log.warn("[$tag] ערוץ המקור מוגן — מצב הורדה והעלאה מחדש")
+        sourceId = source.id
+        sourceTitle = source.title
+        // Telegram's notices while the job runs: protection removed → server-side copy, added → download + upload.
+        // Subscribed before the flag is read, so a change in between is not missed.
+        val watch = launch(start = CoroutineStart.UNDISPATCHED) {
+            accounts[0].protectionNotices.collect { n ->
+                if (protection.onNotice(n.chatId, source.id, n.isProtected)) {
+                    report.sourceInfo(source.id, source.title, n.isProtected)
+                    if (n.isProtected) {
+                        log.warn("[$tag] ערוץ המקור הפך למוגן — עובר להורדה והעלאה")
+                    } else {
+                        log.info("[$tag] ערוץ המקור כבר לא מוגן — עובר להעתקה רגילה")
+                    }
+                }
+            }
+        }
+        protection.set(source.hasProtectedContent)
+        report.sourceInfo(source.id, source.title, protection.isProtected)
+        if (protection.isProtected) log.warn("[$tag] ערוץ המקור מוגן — מצב הורדה והעלאה מחדש")
 
         if (job.startFromId > 0) {
             store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1) }
@@ -117,7 +171,11 @@ class JobRunner(
             "[$tag] פעיל: ${source.title} → ${chats[0].target.title} | ${job.mediaType.label} | " +
                 "${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
         )
-        if (fast) runFast(chats) else runOrdered(chats)
+        try {
+            if (fast) runFast(chats) else runOrdered(chats)
+        } finally {
+            watch.cancel()
+        }
     }
 
     private suspend fun awaitNotPaused() {
@@ -132,6 +190,8 @@ class JobRunner(
 
     private suspend fun runOrdered(chats: List<Pair2>) = coroutineScope {
         val sender = accounts[0]
+        // Several accounts send in turns, one message at a time (the order stays the source's); one account as before.
+        val rotation = if (accounts.size > 1) SenderRotation(accounts.size) else null
         val src = chats[0].source.id
         val dst = chats[0].target.id
         var last = store.progress(job.id).lastId
@@ -149,7 +209,7 @@ class JobRunner(
             } ?: continue
 
             if (batch.isEmpty()) {
-                val latest = sender.latestServerId(src) ?: last
+                val latest = sender.latestServerId(src)?.also { report.latest(it) } ?: last
                 if (latest <= last) {
                     report.phase("מעודכן — ממתין להודעות חדשות")
                     delay(60_000)
@@ -173,16 +233,23 @@ class JobRunner(
 
             val wanted = batch.filter { it.content.matches(job.mediaType) && !isArabicSkipped(it) }
             val prefetch = HashMap<Long, Deferred<Result<Copier.Downloaded>>>()
-            val window = if (protected) maxOf(2, accounts.size * 2) else 0
+            val window = if (protection.isProtected) maxOf(2, accounts.size * 2) else 0
 
             for (msg in batch) {
                 ensureActive()
                 awaitNotPaused()
+                var sent = 0
                 val idx = wanted.indexOf(msg)
                 if (idx >= 0) {
                     if (window > 0) startPrefetch(this, wanted, idx, window, prefetch)
                     report.phase("מעתיק הודעה ${msg.id.serverId()}")
-                    deliver(sender, dst, msg, prefetch.remove(msg.id))
+                    val prefetched = prefetch.remove(msg.id)
+                    val ok = if (rotation == null) {
+                        deliver(sender, dst, msg, prefetched) == Delivery.Sent
+                    } else {
+                        deliverInTurns(rotation, chats, msg, prefetched)
+                    }
+                    if (ok) sent = 1
                 } else {
                     log.info(
                         "[$tag] דילוג על ${msg.id.serverId()} " +
@@ -193,11 +260,77 @@ class JobRunner(
                 store.saveProgress(job.id) { it.copy(lastId = last) }
                 report.position(last)
             }
-            prefetch.values.forEach { it.cancel() }
+            prefetch.values.forEach { discard(it) }
         }
     }
 
-    private fun startPrefetch(
+    /**
+     * One message in ordered mode with several accounts: sent by the next free account in turn. A FloodWait or a
+     * refused send moves it to the next account (never two sends at once, so the order holds). The pause after a
+     * copy is the sender's own rest, while the next account already sends. True when sent.
+     */
+    private suspend fun deliverInTurns(
+        rotation: SenderRotation,
+        chats: List<Pair2>,
+        msg: Message,
+        prefetched: Deferred<Result<Copier.Downloaded>>?,
+    ): Boolean {
+        val sid = msg.id.serverId()
+        val tried = HashSet<Int>()
+        var pending = prefetched
+        try {
+            while (true) {
+                awaitNotPaused()
+                when (val pick = rotation.pick(usable = { accounts[it].isReady }, exclude = tried)) {
+                    is SenderRotation.Pick.Wait -> {
+                        report.phase("כל החשבונות בהמתנה — ${(pick.ms + 999) / 1000} שנ'")
+                        delay(pick.ms)
+                    }
+                    SenderRotation.Pick.None -> {
+                        report.failed()
+                        log.error("[$tag] הודעה $sid לא נשלחה — אף חשבון לא הצליח לשלוח אותה")
+                        return false
+                    }
+                    is SenderRotation.Pick.Account -> {
+                        val i = pick.index
+                        val ac = accounts[i]
+                        // Each TDLib instance sends its own copy of the message.
+                        val own = if (i == 0) msg else ac.client.getMessage(msg.chatId, msg.id).getOrNull()
+                        if (own == null) {
+                            log.warn("[$tag · ${ac.tag}] לא רואה את הודעה $sid — עובר לחשבון הבא")
+                            tried += i
+                            continue
+                        }
+                        // The prefetch goes to the first try only; deliver owns it from there (uses or discards it).
+                        val pre = pending
+                        pending = null
+                        when (val d = deliver(ac, chats[i].target.id, own, pre, floodHandOffAboveSec = 0, failHandOff = true, pauseAfter = false)) {
+                            Delivery.Sent -> {
+                                val base = if (protection.isProtected) 0L else Random.nextLong(1_400, 3_800)
+                                rotation.rest(i, System.currentTimeMillis() + rotation.restMs(i, base))
+                                return true
+                            }
+                            Delivery.Skipped -> return false
+                            // May have gone out: never handed to another account.
+                            Delivery.Unknown -> return false
+                            is Delivery.FloodWait -> {
+                                rotation.busy(i, System.currentTimeMillis() + (d.seconds + 1) * 1000L)
+                                log.warn("[$tag · ${ac.tag}] FloodWait ${d.seconds} שנ' — הודעה $sid עוברת לחשבון הבא")
+                            }
+                            Delivery.Failed -> {
+                                tried += i
+                                log.warn("[$tag · ${ac.tag}] שליחת הודעה $sid נכשלה — מנסה בחשבון הבא")
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            pending?.let { discard(it) }
+        }
+    }
+
+    private suspend fun startPrefetch(
         scope: CoroutineScope,
         wanted: List<Message>,
         from: Int,
@@ -212,7 +345,36 @@ class JobRunner(
         }
     }
 
-    private fun needsUpload(m: Message) = (protected || !m.canBeSaved) && m.content.mainFile() != null
+    /**
+     * Whether [m]'s file must be downloaded and uploaded again. [m] may have been read while the source was protected,
+     * when TDLib marks every message can't-be-saved; TDLib computes that when it builds the message, so it is read
+     * again before deciding.
+     */
+    private suspend fun needsUpload(m: Message, isProtected: Boolean = protection.isProtected): Boolean {
+        if (m.content.mainFile() == null) return false
+        if (isProtected) return true
+        if (m.canBeSaved) return false
+        val now = accounts[0].client.getMessage(m.chatId, m.id).getOrNull() ?: m
+        return !now.canBeSaved
+    }
+
+    /** A copy was refused for protection: the whole job switches only when TDLib says the source is protected now. */
+    private suspend fun protectionRefused(who: String, sid: Long) {
+        val now = accounts[0].refreshChat(sourceId)?.hasProtectedContent ?: true
+        if (!now) {
+            log.warn("[$who] הודעה $sid מוגנת — מוריד ומעלה רק אותה")
+        } else if (protection.set(true)) {
+            report.sourceInfo(sourceId, sourceTitle, true)
+            log.warn("[$who] זוהה ערוץ מוגן — עובר למצב הורדה והעלאה")
+        }
+    }
+
+    /** A prefetch that will not be sent: its file is deleted once TDLib has it. */
+    private fun discard(d: Deferred<Result<Copier.Downloaded>>) {
+        cleanup.launch {
+            runCatching { d.await() }.getOrNull()?.getOrNull()?.let { f -> runCatching { f.owner.deleteLocal(f.fileId) } }
+        }
+    }
 
     /**
      * Downloads the main file of [m] (which was read by [owner]) using account [ac].
@@ -236,7 +398,7 @@ class JobRunner(
             var p = store.progress(job.id)
             report.position(p.lastId)
             if (p.waveEnd <= p.lastId) {
-                val latest = accounts[0].latestServerId(chats[0].source.id)
+                val latest = accounts[0].latestServerId(chats[0].source.id)?.also { report.latest(it) }
                 if (latest == null) {
                     report.phase("שגיאת רשת — מנסה שוב")
                     delay(30_000)
@@ -257,12 +419,67 @@ class JobRunner(
             }
             val wave = p
             report.phase("סבב ${wave.waveStart}–${wave.waveEnd}")
-            (0 until n).mapNotNull { i ->
-                val rs = wave.waveStart + i * chunk
-                if (rs > wave.waveEnd) return@mapNotNull null
+            // Slice k starts with account k. A stuck account (long FloodWait, not connected) hands the rest of its
+            // slice back, and the first free account takes it over: the wave never waits on one account.
+            // From the wave's own range, not the account count: a wave saved with more accounts keeps all its slices.
+            val slices = ((wave.waveEnd - wave.waveStart) / chunk + 1).toInt()
+            val queue = SliceQueue(slices)
+            // Slices beyond the accounts have no first holder: they wait for whoever is free.
+            for (extra in n until slices) queue.release(extra)
+            // True when the slice is done; false when the account got stuck: it leaves this wave (it never holds it)
+            // and rejoins a later one once free (stuckUntil).
+            suspend fun work(i: Int, slice: Int): Boolean {
+                val rs = wave.waveStart + slice * chunk
                 val re = minOf(rs + chunk - 1, wave.waveEnd)
-                async { rangeWorker(i, chats[i], rs, re) }
+                return when (val end = rangeWorker(i, slice, chats[i], rs, re)) {
+                    SliceEnd.Done -> {
+                        queue.done(slice)
+                        true
+                    }
+                    is SliceEnd.Released -> {
+                        stuckUntil[i] = end.untilMs
+                        queue.release(slice)
+                        false
+                    }
+                }
+            }
+            (0 until n).map { i ->
+                async {
+                    val ac = accounts[i]
+                    val stuck = (stuckUntil[i] ?: 0L) > System.currentTimeMillis()
+                    if (i < slices) {
+                        if (!ac.isReady || stuck) {
+                            log.warn(
+                                "[$tag · ${ac.tag}] " + (if (stuck) "עדיין בהמתנת FloodWait" else "החשבון לא מחובר") +
+                                    " — החלק שלו עובר לחשבון פנוי",
+                            )
+                            queue.release(i)
+                            return@async
+                        }
+                        if (!work(i, i)) return@async
+                    } else if (!ac.isReady || stuck) {
+                        return@async
+                    }
+                    while (true) {
+                        val slice = queue.next() ?: break
+                        if (!ac.isReady) {
+                            queue.release(slice)
+                            break
+                        }
+                        log.info("[$tag · ${ac.tag}] ממשיך חלק של חשבון אחר בסבב")
+                        if (!work(i, slice)) break
+                    }
+                }
             }.awaitAll()
+            if (!queue.allDone) {
+                // Every account that could take the rest is stuck or offline: the same wave resumes when the first
+                // stuck one is free (at most 5 minutes between checks, at least 15 s).
+                val now = System.currentTimeMillis()
+                val wait = (stuckUntil.values.filter { it > now }.minOrNull()?.minus(now) ?: 15_000L).coerceIn(15_000L, 300_000L)
+                report.phase("ממתין לחשבון פנוי להמשך הסבב — ${wait / 1000} שנ'")
+                delay(wait)
+                continue
+            }
             store.saveProgress(job.id) { it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap()) }
             report.position(wave.waveEnd)
         }
@@ -275,11 +492,22 @@ class JobRunner(
         return text != null && containsArabic(text)
     }
 
-    private suspend fun rangeWorker(i: Int, chats: Pair2, rs: Long, re: Long) {
+    /** How a slice ended for the account that worked it. */
+    private sealed interface SliceEnd {
+        data object Done : SliceEnd
+
+        /** The account is stuck until [untilMs]; the rest of the slice goes to another account. */
+        data class Released(val untilMs: Long) : SliceEnd
+    }
+
+    /** Account [i] works slice [slice] (its messages [rs]..[re]) from where the slice got to, by anyone. */
+    private suspend fun rangeWorker(i: Int, slice: Int, chats: Pair2, rs: Long, re: Long): SliceEnd {
         val ac = accounts[i]
-        var last = maxOf(rs - 1, store.progress(job.id).workerLast[i] ?: 0)
+        var last = maxOf(rs - 1, store.progress(job.id).workerLast[slice] ?: 0)
         while (last < re) {
             awaitNotPaused()
+            // An account that went offline hands the rest over (also between batches and after failed reads).
+            if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
             val batch = ac.historyAfter(chats.source.id, last).getOrElse { e ->
                 log.error("[$tag · ${ac.tag}] קריאת היסטוריה נכשלה: ${e.message}")
                 delay(15_000)
@@ -297,14 +525,30 @@ class JobRunner(
             if (inRange.isEmpty()) break
             for (msg in inRange) {
                 awaitNotPaused()
+                if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
+                var sent = 0
                 if (msg.content.matches(job.mediaType)) {
-                    if (isArabicSkipped(msg)) log.info("[$tag · ${ac.tag}] דילוג על ${msg.id.serverId()} (ערבית)")
-                    else deliver(ac, chats.target.id, msg, null)
+                    if (isArabicSkipped(msg)) {
+                        log.info("[$tag · ${ac.tag}] דילוג על ${msg.id.serverId()} (ערבית)")
+                    } else {
+                        when (val d = deliver(ac, chats.target.id, msg, null, floodHandOffAboveSec = FAST_HAND_OFF_SEC)) {
+                            Delivery.Sent -> sent = 1
+                            is Delivery.FloodWait -> {
+                                // This message is not done: the account that takes the slice starts from it.
+                                log.warn("[$tag · ${ac.tag}] FloodWait ${d.seconds} שנ' — שאר החלק עובר לחשבון פנוי")
+                                return SliceEnd.Released(System.currentTimeMillis() + (d.seconds + 1) * 1000L)
+                            }
+                            // A send that failed because the account went offline is not done: hand the rest over.
+                            Delivery.Failed -> if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
+                            Delivery.Skipped, Delivery.Unknown -> Unit
+                        }
+                    }
                 }
                 last = msg.id.serverId()
-                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (i to last)) }
+                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (slice to last)) }
             }
         }
+        return SliceEnd.Done
     }
 
     // ── Delivery of one message, with FloodWait handled by retrying the same message. ──
@@ -314,7 +558,13 @@ class JobRunner(
         target: Long,
         msg: Message,
         prefetched: Deferred<Result<Copier.Downloaded>>?,
-    ): Boolean {
+        /** A FloodWait longer than this goes back to the caller as [Delivery.FloodWait]; null: always waited out here. */
+        floodHandOffAboveSec: Int? = null,
+        /** The caller tries another account after [Delivery.Failed], and counts the failure itself. */
+        failHandOff: Boolean = false,
+        /** The random pause after a server-side copy is taken here (false: the caller rests this account instead). */
+        pauseAfter: Boolean = true,
+    ): Delivery {
         val sid = msg.id.serverId()
         val who = if (accounts.size > 1) "$tag · ${sender.tag}" else tag
         var attempts = 0
@@ -325,10 +575,12 @@ class JobRunner(
         try {
             while (true) {
                 awaitNotPaused()
-                val upload = needsUpload(msg) || (forceUpload && msg.content.mainFile() != null)
-                if (protected && !upload && msg.content !is MessageText) {
+                // Read once: the watcher may change it between the two uses.
+                val isProtected = protection.isProtected
+                val upload = needsUpload(msg, isProtected) || (forceUpload && msg.content.mainFile() != null)
+                if (isProtected && !upload && msg.content !is MessageText) {
                     log.warn("[$who] הודעה $sid מסוג שלא ניתן להעתיק מערוץ מוגן — דילוג")
-                    return false
+                    return Delivery.Skipped
                 }
                 val content = if (upload) {
                     if (downloaded == null) {
@@ -341,8 +593,8 @@ class JobRunner(
                     val d = downloaded
                     if (d == null) {
                         if (++attempts >= 3) {
-                            report.failed()
-                            return false
+                            if (!failHandOff) report.failed()
+                            return Delivery.Failed
                         }
                         delay(5_000)
                         continue
@@ -351,8 +603,8 @@ class JobRunner(
                     // protected remote file and Telegram rejects it as "can't be forwarded".
                     val copy = uploadCopy ?: freshCopy(sender, sid, d.path).getOrElse { e ->
                         log.error("[$who] הכנת קובץ להעלאה נכשלה: ${e.message}")
-                        report.failed()
-                        return false
+                        if (!failHandOff) report.failed()
+                        return Delivery.Failed
                     }.also { uploadCopy = it }
                     Copier.uploadContent(msg, copy.absolutePath, job.stripLinks)
                 } else {
@@ -360,7 +612,7 @@ class JobRunner(
                 }
                 if (content == null) {
                     log.info("[$who] דילוג על $sid (ריק אחרי ניקוי קישורים)")
-                    return false
+                    return Delivery.Skipped
                 }
 
                 limiters.getValue(sender.account.id).acquire { ms ->
@@ -372,21 +624,32 @@ class JobRunner(
                         report.copied()
                         report.delivered(target, r.messageId.serverId())
                         log.success("[$who] הועתקה הודעה $sid")
-                        if (!protected) delay(Random.nextLong(1_400, 3_800))
-                        return true
+                        if (pauseAfter && !protection.isProtected) delay(Random.nextLong(1_400, 3_800))
+                        return Delivery.Sent
                     }
                     is SendOutcome.Failed -> {
                         if (r.retryAfterSec > 0) {
+                            if (floodHandOffAboveSec != null && r.retryAfterSec > floodHandOffAboveSec) {
+                                return Delivery.FloodWait(r.retryAfterSec)
+                            }
                             log.warn("[$who] FloodWait ${r.retryAfterSec} שנ' — ממתין ומנסה שוב את הודעה $sid")
                             report.phase("FloodWait — ממתין ${r.retryAfterSec} שנ'")
                             delay((r.retryAfterSec + 1) * 1000L)
                             continue
                         }
+                        if (r.code == AccountClient.SEND_TIMEOUT) {
+                            log.warn("[$who] אין תשובה מטלגרם על הודעה $sid — ייתכן שנשלחה; לא שולח שוב כדי לא ליצור כפילות")
+                            return Delivery.Unknown
+                        }
+                        if (r.code == AccountClient.SEND_DISCONNECTED) {
+                            log.warn("[$who] החשבון התנתק לפני שהודעה $sid נשלחה")
+                            if (!failHandOff) report.failed()
+                            return Delivery.Failed
+                        }
                         if (!upload && msg.content.mainFile() != null) {
                             forceUpload = true
                             if (Copier.isProtectedError(r.message)) {
-                                protected = true
-                                log.warn("[$who] זוהה ערוץ מוגן — עובר למצב הורדה והעלאה")
+                                protectionRefused(who, sid)
                             } else {
                                 log.warn("[$who] העתקה ישירה של $sid נכשלה (${r.message}) — מנסה בהורדה והעלאה")
                             }
@@ -403,8 +666,8 @@ class JobRunner(
                         // Reload the source message in case TDLib dropped it from memory.
                         sender.client.getMessage(msg.chatId, msg.id)
                         if (++attempts >= 3) {
-                            report.failed()
-                            return false
+                            if (!failHandOff) report.failed()
+                            return Delivery.Failed
                         }
                         delay(3_000L * attempts)
                     }
@@ -412,6 +675,8 @@ class JobRunner(
             }
         } finally {
             downloaded?.let { runCatching { it.owner.deleteLocal(it.fileId) } }
+            // Downloaded ahead while the source was protected, then copied server-side: its file is deleted.
+            if (downloaded == null && prefetched != null) discard(prefetched)
             uploadCopy?.parentFile?.deleteRecursively()
         }
     }
