@@ -380,7 +380,7 @@ class AccountClient(
     }
 
     companion object {
-        /** [SendOutcome.Failed] code: no answer for 3 hours; TDLib may still send the message (never resend it). */
+        /** [SendOutcome.Failed] code: no answer for 3 hours; TDLib may still send it, yet it is retried (a duplicate beats a gap). */
         const val SEND_TIMEOUT = -1
 
         /** [SendOutcome.Failed] code: the account logged out or closed while the message was waiting (not sent). */

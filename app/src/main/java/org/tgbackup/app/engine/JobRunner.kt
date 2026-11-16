@@ -69,9 +69,6 @@ sealed interface Delivery {
 
     /** Every retry on this account was refused. */
     data object Failed : Delivery
-
-    /** No answer from Telegram: the message may still go out, so it is never sent again (no duplicates). */
-    data object Unknown : Delivery
 }
 
 /** Callbacks from a runner to the UI-facing job status. */
@@ -311,8 +308,6 @@ class JobRunner(
                                 return true
                             }
                             Delivery.Skipped -> return false
-                            // May have gone out: never handed to another account.
-                            Delivery.Unknown -> return false
                             is Delivery.FloodWait -> {
                                 rotation.busy(i, System.currentTimeMillis() + (d.seconds + 1) * 1000L)
                                 log.warn("[$tag · ${ac.tag}] FloodWait ${d.seconds} שנ' — הודעה $sid עוברת לחשבון הבא")
@@ -449,11 +444,17 @@ class JobRunner(
                     val stuck = (stuckUntil[i] ?: 0L) > System.currentTimeMillis()
                     if (i < slices) {
                         if (!ac.isReady || stuck) {
-                            log.warn(
-                                "[$tag · ${ac.tag}] " + (if (stuck) "עדיין בהמתנת FloodWait" else "החשבון לא מחובר") +
-                                    " — החלק שלו עובר לחשבון פנוי",
-                            )
-                            queue.release(i)
+                            val re = minOf(wave.waveStart + i * chunk + chunk - 1, wave.waveEnd)
+                            if ((store.progress(job.id).workerLast[i] ?: 0) >= re) {
+                                // Its slice was already finished (a resumed wave): nothing to hand over.
+                                queue.done(i)
+                            } else {
+                                log.warn(
+                                    "[$tag · ${ac.tag}] " + (if (stuck) "עדיין בהמתנת FloodWait" else "החשבון לא מחובר") +
+                                        " — החלק שלו עובר לחשבון פנוי",
+                                )
+                                queue.release(i)
+                            }
                             return@async
                         }
                         if (!work(i, i)) return@async
@@ -540,7 +541,7 @@ class JobRunner(
                             }
                             // A send that failed because the account went offline is not done: hand the rest over.
                             Delivery.Failed -> if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
-                            Delivery.Skipped, Delivery.Unknown -> Unit
+                            Delivery.Skipped -> Unit
                         }
                     }
                 }
@@ -572,6 +573,7 @@ class JobRunner(
         var uploadCopy: File? = null
         // Set when a server-side copy of this message failed: retry it as download + upload.
         var forceUpload = false
+        var unusedPrefetch = prefetched
         try {
             while (true) {
                 awaitNotPaused()
@@ -585,7 +587,10 @@ class JobRunner(
                 val content = if (upload) {
                     if (downloaded == null) {
                         report.phase("מוריד הודעה $sid")
-                        downloaded = (prefetched?.await() ?: downloadWith(sender, sender, msg)).getOrElse { e ->
+                        // A prefetch is used once: after a failed one the next try downloads with the sender.
+                        val pre = unusedPrefetch
+                        unusedPrefetch = null
+                        downloaded = (pre?.await() ?: downloadWith(sender, sender, msg)).getOrElse { e ->
                             log.error("[$who] הורדת הודעה $sid נכשלה: ${e.message}")
                             null
                         }
@@ -637,16 +642,18 @@ class JobRunner(
                             delay((r.retryAfterSec + 1) * 1000L)
                             continue
                         }
+                        // No answer for 3 hours: it may still go out, but a missing message is worse than a duplicate (the user's
+                        // rule), so it is retried like any refused send (and handed to the next account in ordered mode).
                         if (r.code == AccountClient.SEND_TIMEOUT) {
-                            log.warn("[$who] אין תשובה מטלגרם על הודעה $sid — ייתכן שנשלחה; לא שולח שוב כדי לא ליצור כפילות")
-                            return Delivery.Unknown
+                            log.warn("[$who] אין תשובה מטלגרם על הודעה $sid — שולח שוב (עדיף כפילות על הודעה חסרה)")
                         }
                         if (r.code == AccountClient.SEND_DISCONNECTED) {
                             log.warn("[$who] החשבון התנתק לפני שהודעה $sid נשלחה")
                             if (!failHandOff) report.failed()
                             return Delivery.Failed
                         }
-                        if (!upload && msg.content.mainFile() != null) {
+                        // (A timeout is not a refusal of the copy: it is retried as it was, not as an upload.)
+                        if (r.code != AccountClient.SEND_TIMEOUT && !upload && msg.content.mainFile() != null) {
                             forceUpload = true
                             if (Copier.isProtectedError(r.message)) {
                                 protectionRefused(who, sid)
@@ -676,7 +683,7 @@ class JobRunner(
         } finally {
             downloaded?.let { runCatching { it.owner.deleteLocal(it.fileId) } }
             // Downloaded ahead while the source was protected, then copied server-side: its file is deleted.
-            if (downloaded == null && prefetched != null) discard(prefetched)
+            unusedPrefetch?.let { discard(it) }
             uploadCopy?.parentFile?.deleteRecursively()
         }
     }
