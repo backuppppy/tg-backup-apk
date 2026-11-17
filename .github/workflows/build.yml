@@ -27,7 +27,9 @@ jobs:
           gradle-version: '8.14.3'
 
       - name: Build release APK
-        run: gradle --no-daemon --stacktrace :app:assembleRelease
+        # More heap than gradle.properties (6g): R8 on the thousands of generated MTP classes ran out of memory
+        # on 17/11 (twice in a row). The runner has 16 GB; the rest is left for the Kotlin daemon and the system.
+        run: gradle --no-daemon --stacktrace "-Dorg.gradle.jvmargs=-Xmx10g -Dfile.encoding=UTF-8" :app:assembleRelease
 
       - name: Verify signature
         run: |
