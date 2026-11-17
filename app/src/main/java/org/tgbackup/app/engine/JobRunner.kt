@@ -131,6 +131,9 @@ class JobRunner(
          */
         const val SEND_STUCK_MS = 90_000L
 
+        /** Finding one chat for one account longer than this is logged as slow (and reported once). */
+        const val SLOW_RESOLVE_MS = 20_000L
+
         /** A caption may have this many characters without Premium. */
         const val CAPTION_LIMIT = 1024
     }
@@ -148,8 +151,8 @@ class JobRunner(
         }
         report.phase("מאתר ערוצים")
         val chats = accounts.map { ac ->
-            val source = ac.resolveChat(job.source).getOrThrow()
-            val target = ac.resolveChat(job.target).getOrThrow()
+            val source = timedResolve(ac, job.source, "מקור")
+            val target = timedResolve(ac, job.target, "יעד")
             Pair2(source, target)
         }
         // An opened chat keeps its loaded messages in TDLib memory, which copying relies on.
@@ -191,6 +194,29 @@ class JobRunner(
         } finally {
             watch.cancel()
         }
+    }
+
+    /**
+     * Finds [raw] for [ac] and logs how long it took, so a slow start shows where it waits. Over [SLOW_RESOLVE_MS] it
+     * is a warning, and Sentry hears of it once per job and account.
+     */
+    private suspend fun timedResolve(ac: AccountClient, raw: String, role: String): Chat {
+        report.phase("מאתר ערוץ $role (${ac.tag})")
+        val t0 = System.currentTimeMillis()
+        val chat = ac.resolveChat(raw).getOrThrow()
+        val ms = System.currentTimeMillis() - t0
+        val line = "[$tag · ${ac.tag}] ערוץ ה$role נמצא ב-${"%.1f".format(ms / 1000.0)} שנ': ${chat.title}"
+        if (ms > SLOW_RESOLVE_MS) {
+            log.warn("$line (איטי)")
+            SentryOnce.message("resolve-slow|${job.id}|${ac.account.id}|$role", "Finding a chat took ${ms / 1000} s", SentryLevel.WARNING) { s ->
+                s.setTag("job", tag)
+                s.setTag("role", if (role == "מקור") "source" else "target")
+                s.setExtra("seconds", (ms / 1000).toString())
+            }
+        } else {
+            log.info(line)
+        }
+        return chat
     }
 
     private suspend fun awaitNotPaused() {
