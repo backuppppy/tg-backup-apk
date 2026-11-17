@@ -31,6 +31,7 @@ import io.sentry.Sentry
 import io.sentry.SentryLevel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 class RateLimiter(private val perMinute: Int) {
@@ -115,6 +116,12 @@ class JobRunner(
     private companion object {
         /** Fast mode: a FloodWait longer than this hands the rest of the account's slice to a free account. */
         const val FAST_HAND_OFF_SEC = 60
+
+        /** Ordered mode reads this many ids at a time. */
+        const val ORDERED_WINDOW = 50
+
+        /** A read that takes longer than this is stuck (a FLOOD_WAIT TDLib waits out without telling us). */
+        const val READ_STUCK_MS = 60_000L
     }
     private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
 
@@ -193,39 +200,29 @@ class JobRunner(
         val dst = chats[0].target.id
         var last = store.progress(job.id).lastId
         report.position(last)
+        var latest = last
 
         while (true) {
             ensureActive()
             awaitNotPaused()
-            report.phase("סורק הודעות אחרי $last")
-            var batch = sender.historyAfter(src, last).getOrElse { e ->
-                log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
-                report.phase("שגיאת רשת — מנסה שוב")
-                delay(15_000)
-                null
-            } ?: continue
-
-            if (batch.isEmpty()) {
-                val latest = sender.latestServerId(src)?.also { report.latest(it) } ?: last
-                if (latest <= last) {
+            if (last >= latest) {
+                latest = sender.latestServerId(src)?.also { report.latest(it) } ?: latest
+                if (last >= latest) {
                     report.phase("מעודכן — ממתין להודעות חדשות")
                     delay(60_000)
                     continue
                 }
-                // Newer messages exist but none came back: check the next range explicitly.
-                val next = minOf(last + 50, latest)
-                batch = sender.range(src, last, next - last).getOrElse { e ->
-                    log.error("[$tag] קריאת היסטוריה נכשלה: ${e.message}")
-                    delay(15_000)
-                    null
-                } ?: continue
-                if (batch.isEmpty()) {
-                    // A run of deleted message ids.
-                    last = next
-                    store.saveProgress(job.id) { it.copy(lastId = last) }
-                    report.position(last)
-                    continue
-                }
+            }
+            // The next ids, read by id in one request (never by browsing history: that floods Telegram).
+            val ids = idWindow(last, latest, ORDERED_WINDOW)
+            report.phase("קורא הודעות ${ids.first}–${ids.last}")
+            val batch = readIds(sender, src, ids) ?: continue
+            if (batch.isEmpty()) {
+                // A run of deleted message ids.
+                last = ids.last
+                store.saveProgress(job.id) { it.copy(lastId = last) }
+                report.position(last)
+                continue
             }
 
             val wanted = batch.filter { it.content.matches(job.mediaType) && !isArabicSkipped(it) }
@@ -258,6 +255,12 @@ class JobRunner(
                 report.position(last)
             }
             prefetch.values.forEach { discard(it) }
+            // Deleted ids at the end of the window are passed too.
+            if (last < ids.last) {
+                last = ids.last
+                store.saveProgress(job.id) { it.copy(lastId = last) }
+                report.position(last)
+            }
         }
     }
 
@@ -493,6 +496,25 @@ class JobRunner(
         return text != null && containsArabic(text)
     }
 
+    /**
+     * Ordered mode's read of [ids] from [ac]: null after an error or a read stuck for a minute (TDLib waits out a
+     * FLOOD_WAIT by itself and never reports it), then the caller reads again.
+     */
+    private suspend fun readIds(ac: AccountClient, chatId: Long, ids: LongRange): List<Message>? {
+        val read = withTimeoutOrNull(READ_STUCK_MS) { ac.messagesByIds(chatId, ids) }
+        if (read == null) {
+            log.warn("[$tag] קריאת ההודעות ${ids.first}–${ids.last} תקועה יותר מדקה — מנסה שוב")
+            report.phase("טלגרם מאט את הקריאה — מנסה שוב")
+            return null
+        }
+        return read.getOrElse { e ->
+            log.error("[$tag] קריאת הודעות נכשלה: ${e.message}")
+            report.phase("שגיאת רשת — מנסה שוב")
+            delay(15_000)
+            null
+        }
+    }
+
     /** How a slice ended for the account that worked it. */
     private sealed interface SliceEnd {
         data object Done : SliceEnd
@@ -509,21 +531,19 @@ class JobRunner(
             awaitNotPaused()
             // An account that went offline hands the rest over (also between batches and after failed reads).
             if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
-            val batch = ac.historyAfter(chats.source.id, last).getOrElse { e ->
-                log.error("[$tag · ${ac.tag}] קריאת היסטוריה נכשלה: ${e.message}")
+            // The rest of the slice, read by id in one request. TDLib waits out a FLOOD_WAIT on reads by itself and
+            // never says so: a read stuck for a minute counts as stuck, and the slice goes to a free account.
+            val ids = (last + 1)..re
+            val read = withTimeoutOrNull(READ_STUCK_MS) { ac.messagesByIds(chats.source.id, ids) }
+            if (read == null) {
+                log.warn("[$tag · ${ac.tag}] קריאת ההודעות ${ids.first}–${ids.last} תקועה יותר מדקה — שאר החלק עובר לחשבון פנוי")
+                return SliceEnd.Released(System.currentTimeMillis() + READ_STUCK_MS)
+            }
+            val inRange = read.getOrElse { e ->
+                log.error("[$tag · ${ac.tag}] קריאת הודעות נכשלה: ${e.message}")
                 delay(15_000)
                 null
             } ?: continue
-            var inRange = batch.filter { it.id.serverId() <= re }
-            if (batch.isEmpty()) {
-                // Nothing came back — read the rest of the range explicitly before calling it done.
-                inRange = ac.range(chats.source.id, last, re - last).getOrElse { e ->
-                    log.error("[$tag · ${ac.tag}] קריאת היסטוריה נכשלה: ${e.message}")
-                    delay(15_000)
-                    null
-                } ?: continue
-            }
-            if (inRange.isEmpty()) break
             for (msg in inRange) {
                 awaitNotPaused()
                 if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
@@ -548,6 +568,9 @@ class JobRunner(
                 last = msg.id.serverId()
                 store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (slice to last)) }
             }
+            // Every id of the slice was read: deleted ones (missing from the result) are passed too.
+            last = re
+            store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (slice to re)) }
         }
         return SliceEnd.Done
     }

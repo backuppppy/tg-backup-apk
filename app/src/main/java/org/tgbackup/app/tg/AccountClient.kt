@@ -253,14 +253,17 @@ class AccountClient(
 
     private suspend fun chatByIds(ids: List<Long>): Chat? {
         for (id in ids) chatById(id)?.let { return it }
-        // The chat may simply not be loaded into TDLib yet — load the chat lists and retry.
+        // The chat may simply not be loaded into TDLib yet: load the chat lists page by page and stop as soon as it
+        // is there. Loading every page first took minutes for an account with many chats, and made TDLib fetch the
+        // full info of each one (dozens of requests to Telegram, FLOOD_WAITs).
         for (list in listOf(ChatListMain(), ChatListArchive())) {
             for (page in 0 until 30) {
                 // Fails with 404 once the whole list is loaded.
-                if (client.loadChats(list, 200) is TdlResult.Failure) break
+                val more = client.loadChats(list, 100) !is TdlResult.Failure
+                for (id in ids) client.getChat(id).getOrNull()?.let { return it }
+                if (!more) break
             }
         }
-        for (id in ids) client.getChat(id).getOrNull()?.let { return it }
         return null
     }
 
@@ -321,9 +324,30 @@ class AccountClient(
         return Result.success(out.distinctBy { it.id }.sortedBy { it.id })
     }
 
+    /**
+     * The source's newest server id. TDLib keeps the chat's last message current from updates, so this is read from
+     * memory; only when it has none is one history page asked from the server.
+     */
     suspend fun latestServerId(chatId: Long): Long? {
+        client.getChat(chatId).getOrNull()?.lastMessage?.let { return it.id.serverId() }
         val r = client.getChatHistory(chatId, 0, 0, 1, false).getOrNull() ?: return null
         return r.messages.filterNotNull().maxOfOrNull { it.id.serverId() } ?: 0L
+    }
+
+    /**
+     * The messages with these server ids, oldest first, in one request per 100 ids (getMessages): a job knows which
+     * ids it holds, so it never browses history (that costs Telegram many requests and FLOOD_WAITs). A deleted id is
+     * simply missing from the result.
+     */
+    suspend fun messagesByIds(chatId: Long, serverIds: LongRange): Result<List<Message>> {
+        val out = ArrayList<Message>()
+        for (chunk in serverIds.chunked(100)) {
+            when (val r = client.getMessages(chatId, LongArray(chunk.size) { chunk[it] shl 20 })) {
+                is TdlResult.Success -> out += r.result.messages.filterNotNull()
+                is TdlResult.Failure -> return Result.failure(RuntimeException("${r.code}: ${r.message}"))
+            }
+        }
+        return Result.success(out.distinctBy { it.id }.sortedBy { it.id })
     }
 
     // ── Sending ──────────────────────────────────────────────────────────────
