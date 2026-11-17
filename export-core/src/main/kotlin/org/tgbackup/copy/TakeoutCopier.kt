@@ -576,6 +576,16 @@ class TakeoutCopier(
 
         fun kindOf(m: MTPDmessage): CopyKind = kindOfMedia(m.vmedia)
 
+        /** The name of the message's file (document attribute), for the extension filter; null when it has none. */
+        fun fileNameOf(m: MTPDmessage): String? {
+            // As in TDLib: stickers, voice and round videos have no file name to match.
+            if (kindOf(m) in setOf(CopyKind.STICKER, CopyKind.VOICE, CopyKind.ROUND)) return null
+            val media = m.vmedia as? MTPDmessageMediaDocument ?: return null
+            val d = media.vdocument as? MTPDdocument ?: return null
+            return d.vattributes.filterIsInstance<MTPDdocumentAttributeFilename>().firstOrNull()?.vfile_name
+                ?.takeIf { it.isNotBlank() }
+        }
+
         private fun kindOfMedia(media: MTPMessageMedia?): CopyKind = when (media) {
             null, is MTPDmessageMediaEmpty, is MTPDmessageMediaWebPage -> CopyKind.TEXT
             // Paid media: determine kind from the first unlocked extended_media item (takeout session).

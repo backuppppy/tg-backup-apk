@@ -54,8 +54,38 @@ fun MessageContent.matches(type: MediaType): Boolean {
         MediaType.ALL_MEDIA -> isCopyable && this !is MessageText && this !is MessageSticker
         MediaType.TEXT -> this is MessageText
         MediaType.ALL -> isCopyable
+        MediaType.VIDEO -> this is MessageVideo || this is MessageAnimation || this is MessageVideoNote
+        MediaType.FILE -> this is MessageDocument
+        MediaType.MUSIC -> this is MessageAudio
+        MediaType.VOICE -> this is MessageVoiceNote
     }
 }
+
+/** What to do when Telegram refuses a caption as too long. */
+enum class CaptionStep { KeepOriginal, Split, GiveUp }
+
+/**
+ * A server-side copy whose caption was replaced (links stripped) first tries the original caption: a long caption
+ * of a Premium author often passes then. After that, or for an upload, the caption is split; a split one that is
+ * still refused is a plain failure.
+ */
+fun captionRetry(upload: Boolean, replacedCaption: Boolean, triedOriginal: Boolean, alreadySplit: Boolean): CaptionStep = when {
+    alreadySplit -> CaptionStep.GiveUp
+    !upload && replacedCaption && !triedOriginal -> CaptionStep.KeepOriginal
+    else -> CaptionStep.Split
+}
+
+/** The name of the message's file, for the extension filter; null when it has none (photos, text, voice). */
+fun MessageContent.fileName(): String? = when (this) {
+    is MessageDocument -> document.fileName
+    is MessageVideo -> video.fileName
+    is MessageAudio -> audio.fileName
+    is MessageAnimation -> animation.fileName
+    else -> null
+}?.takeIf { it.isNotBlank() }
+
+/** The job's content filter applied to a TDLib message. */
+fun ContentFilter.accepts(content: MessageContent): Boolean = accepts({ content.matches(it) }, content.fileName())
 
 private val linkRegex = Regex("""https?://\S+|www\.\S+|t\.me/\S+|@\S+""")
 
@@ -90,7 +120,13 @@ fun MessageContent.mainFile(): TdFile? = when (this) {
 object Copier {
 
     /** Server-side copy: no download, no "forwarded from" header, optionally with a cleaned caption. */
-    fun copyContent(msg: Message, strip: Boolean, captionOverride: FormattedText? = null): InputMessageContent? {
+    fun copyContent(
+        msg: Message,
+        strip: Boolean,
+        captionOverride: FormattedText? = null,
+        /** Copy the caption as it is (links kept): Telegram may take an original long caption it refuses as new. */
+        keepOriginalCaption: Boolean = false,
+    ): InputMessageContent? {
         val content = msg.content
         if (content is MessageText) {
             // Messages with a link preview keep their link — the link is the content.
@@ -99,7 +135,7 @@ object Copier {
             return InputMessageText(text, null, false)
         }
         val caption = content.caption()
-        val replace = captionOverride != null || (strip && caption != null)
+        val replace = captionOverride != null || (strip && caption != null && !keepOriginalCaption)
         return InputMessageForwarded(
             fromChatId = msg.chatId,
             messageId = msg.id,

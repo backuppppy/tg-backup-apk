@@ -40,7 +40,8 @@ class SenderRotation(private val size: Int, private val now: () -> Long = System
     fun busy(index: Int, untilMs: Long) {
         busyUntil[index] = untilMs
         val wait = (untilMs - now()).coerceIn(HOT_MIN_MS, HOT_MAX_MS)
-        hotUntil[index] = untilMs + wait
+        // A short wait never cuts a longer hot window short.
+        hotUntil[index] = maxOf(hotUntil[index], untilMs + wait)
     }
 
     /** The pause after a send, until [untilMs]. */

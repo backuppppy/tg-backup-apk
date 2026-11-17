@@ -44,6 +44,10 @@ fun CopyKind.matches(type: MediaType): Boolean {
         MediaType.ALL_MEDIA -> fileLike || this == CopyKind.PHOTO
         MediaType.TEXT -> this == CopyKind.TEXT
         MediaType.ALL -> true
+        MediaType.VIDEO -> this == CopyKind.VIDEO || this == CopyKind.ANIMATION || this == CopyKind.ROUND
+        MediaType.FILE -> this == CopyKind.DOCUMENT
+        MediaType.MUSIC -> this == CopyKind.AUDIO
+        MediaType.VOICE -> this == CopyKind.VOICE
     }
 }
 
@@ -68,6 +72,9 @@ class TakeoutJobRunner(
     private val clearStartFrom: () -> Unit,
 ) {
     private val tag = job.name.ifBlank { job.id }
+    private val filter = job.contentFilter()
+    /** Fast mode: the slice size of the wave in progress (for the diagnostics). */
+    @Volatile private var waveChunk = DEFAULT_SLICE
     private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
     private var sourceChatId = 0L
     private var targetChatId = 0L
@@ -132,7 +139,7 @@ class TakeoutJobRunner(
             val fast = job.mode == JobMode.FAST && accounts.size > 1
             log.info(
                 "[$tag] פעיל בלי הורדה (סשן ייצוא): ${workers[0].src.title} → ${workers[0].dst.title} | " +
-                    "${job.mediaType.label} | ${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
+                    "${job.contentLabel()} | ${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
             )
             if (fast) runFast(workers) else loop(workers[0])
         } finally {
@@ -203,7 +210,7 @@ class TakeoutJobRunner(
                 val id = TakeoutCopier.idOf(m)
                 if (m is MTPDmessage) {
                     val kind = TakeoutCopier.kindOf(m)
-                    if (!kind.matches(job.mediaType)) log.info("[$tag] דילוג על $id (לא תואם לסינון)")
+                    if (!filter.accepts(kind, TakeoutCopier.fileNameOf(m))) log.info("[$tag] דילוג על $id (לא תואם לסינון)")
                     else if (job.skipArabic && containsArabic(m.vmessage)) log.info("[$tag] דילוג על $id (ערבית)")
                     else deliver(w, m)
                 }
@@ -218,7 +225,6 @@ class TakeoutJobRunner(
 
     private suspend fun runFast(workers: List<Worker>) = coroutineScope {
         val n = workers.size
-        val chunk = FAST_CHUNK
         var prevWaveEnd = 0L
         var fastStartSent = false
         while (true) {
@@ -229,6 +235,9 @@ class TakeoutJobRunner(
             var latestKnown = 0L
             var latestError = ""
             val resumed = p.waveEnd > p.lastId
+            // A new wave takes the size from the limit; a saved one keeps the size it was opened with.
+            val chunk = if (resumed) waveSliceSize(p.waveChunk) else sliceSize(job.perMinuteLimit)
+            waveChunk = chunk
             if (!resumed) {
                 val latest = try {
                     workers[0].copier.latestId(workers[0].src).toLong()
@@ -299,9 +308,9 @@ class TakeoutJobRunner(
                 if (TakeoutDiagnostics.waveGap(prevWaveEnd, ws) && !jump) {
                     anomaly("wave-gap", "", ws, we, 0, p.lastId, 0, 0, mapOf("ws" to ws.toString(), "prev_wave_end" to prevWaveEnd.toString()))
                 }
-                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = true) }
+                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), viaTakeout = true, waveChunk = chunk) }
                 p = store.progress(job.id)
-                log.info("[$tag] סבב חדש: הודעות $ws–$we")
+                log.info("[$tag] סבב חדש: הודעות $ws–$we (חלק של $chunk לחשבון)")
             } else {
                 log.info("[$tag] ממשיך סבב קיים: ${p.waveStart}–${p.waveEnd}")
                 if (!fastStartSent) {
@@ -341,7 +350,7 @@ class TakeoutJobRunner(
             }
             prevWaveEnd = wave.waveEnd
             store.saveProgress(job.id) {
-                it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), viaTakeout = true)
+                it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), viaTakeout = true, waveChunk = 0)
             }
             report.position(wave.waveEnd)
         }
@@ -383,7 +392,7 @@ class TakeoutJobRunner(
             if (firstId == 0L && batch.isNotEmpty()) {
                 firstId = TakeoutCopier.idOf(batch.first()).toLong()
                 log.info("[$tag·$acc] הודעה ראשונה שהתקבלה: $firstId (פרוסה $rs–$re)")
-                if (TakeoutDiagnostics.firstFar(firstId, rs, FAST_CHUNK)) {
+                if (TakeoutDiagnostics.firstFar(firstId, rs, waveChunk)) {
                     anomaly("first-far|${rs / 100_000}", acc, rs, re, firstId, last, last, sent, mapOf("resumed" to waveResumed.toString()))
                 }
             }
@@ -410,7 +419,7 @@ class TakeoutJobRunner(
                 if (TakeoutDiagnostics.outsideSlice(id.toLong(), rs, re)) {
                     anomaly("outside-slice", acc, rs, re, firstId, last, last, sent, mapOf("id" to id.toString()))
                 }
-                if (m is MTPDmessage && TakeoutCopier.kindOf(m).matches(job.mediaType)) {
+                if (m is MTPDmessage && filter.accepts(TakeoutCopier.kindOf(m), TakeoutCopier.fileNameOf(m))) {
                     if (job.skipArabic && containsArabic(m.vmessage)) {
                         log.info("[$tag·${w.account.tag}] דילוג על $id (ערבית)")
                     } else {
@@ -668,6 +677,5 @@ class TakeoutJobRunner(
 
     private companion object {
         const val CHANNEL_SHIFT = 1_000_000_000_000L
-        const val FAST_CHUNK = 25
     }
 }

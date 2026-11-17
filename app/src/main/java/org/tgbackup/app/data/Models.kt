@@ -19,6 +19,10 @@ enum class MediaType(val label: String) {
     ALL_MEDIA("כל המדיה (ללא מדבקות)"),
     TEXT("טקסט בלבד"),
     ALL("הכל"),
+    VIDEO("סרטונים"),
+    FILE("קבצים"),
+    MUSIC("מוזיקה"),
+    VOICE("הודעות קוליות"),
 }
 
 @Serializable
@@ -44,6 +48,10 @@ data class Job(
     val perMinuteLimit: Int = 25,
     /** Copy without downloading: read through the export (takeout) session and send files by reference. */
     val viaTakeout: Boolean = false,
+    /** Content types chosen in the editor (multi-select); null = a job saved before this field: use [mediaType]. */
+    val mediaTypes: List<MediaType>? = null,
+    /** Optional file extensions ("pdf, zip"): such files are copied in addition to [mediaTypes]. */
+    val extensions: String = "",
 )
 
 @Serializable
@@ -65,4 +73,6 @@ data class Progress(
     val viaTakeout: Boolean = false,
     /** TDLib chat id of the source this progress belongs to; 0 = unknown (progress written before this field existed). */
     val sourceId: Long = 0,
+    /** Fast mode: the slice size the saved wave was opened with; 0 = saved before this field (25). */
+    val waveChunk: Int = 0,
 )

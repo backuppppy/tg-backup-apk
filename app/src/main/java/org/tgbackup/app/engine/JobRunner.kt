@@ -103,6 +103,9 @@ class JobRunner(
     private val clearStartFrom: () -> Unit,
 ) {
     private val tag = job.name.ifBlank { job.id }
+    private val filter = job.contentFilter()
+    /** Fast mode: which accounts are "hot" after a FloodWait (they rest longer after each send); no turns here. */
+    private val fastHot = SenderRotation(accounts.size)
     private val protection = SourceProtection(false)
 
     /** The source as resolved by the first account, for the card's protection line. */
@@ -186,7 +189,7 @@ class JobRunner(
 
         val fast = job.mode == JobMode.FAST && accounts.size > 1
         log.info(
-            "[$tag] פעיל: ${source.title} → ${chats[0].target.title} | ${job.mediaType.label} | " +
+            "[$tag] פעיל: ${source.title} → ${chats[0].target.title} | ${job.contentLabel()} | " +
                 "${accounts.size} חשבונות | ${if (fast) "מהיר" else "מסודר"}",
         )
         try {
@@ -262,7 +265,7 @@ class JobRunner(
                 continue
             }
 
-            val wanted = batch.filter { it.content.matches(job.mediaType) && !isArabicSkipped(it) }
+            val wanted = batch.filter { filter.accepts(it.content) && !isArabicSkipped(it) }
             // With turns, every other account reads the same ids once (one request each), so a send by it needs no
             // request of its own per message.
             val copies: Map<Int, Map<Long, Message>> = if (rotation == null) {
@@ -296,7 +299,7 @@ class JobRunner(
                 } else {
                     log.info(
                         "[$tag] דילוג על ${msg.id.serverId()} " +
-                            if (msg.content.matches(job.mediaType)) "(ערבית)" else "(לא תואם לסינון)",
+                            if (filter.accepts(msg.content)) "(ערבית)" else "(לא תואם לסינון)",
                     )
                 }
                 last = msg.id.serverId()
@@ -440,7 +443,6 @@ class JobRunner(
 
     private suspend fun runFast(chats: List<Pair2>) = coroutineScope {
         val n = accounts.size
-        val chunk = 25
         while (true) {
             ensureActive()
             awaitNotPaused()
@@ -458,15 +460,18 @@ class JobRunner(
                     delay(60_000)
                     continue
                 }
+                val size = sliceSize(job.perMinuteLimit)
                 val ws = p.lastId + 1
-                val we = minOf(p.lastId + n * chunk, latest)
-                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap()) }
+                val we = minOf(p.lastId + n * size, latest)
+                store.saveProgress(job.id) { it.copy(waveStart = ws, waveEnd = we, workerLast = emptyMap(), waveChunk = size) }
                 p = store.progress(job.id)
-                log.info("[$tag] סבב חדש: הודעות $ws–$we")
+                log.info("[$tag] סבב חדש: הודעות $ws–$we (חלק של $size לחשבון)")
             } else {
                 log.info("[$tag] ממשיך סבב קיים: ${p.waveStart}–${p.waveEnd}")
             }
             val wave = p
+            // A wave keeps the size it was opened with, even if the limit changed since.
+            val chunk = waveSliceSize(wave.waveChunk)
             report.phase("סבב ${wave.waveStart}–${wave.waveEnd}")
             // Slice k starts with account k. A stuck account (long FloodWait, not connected) hands the rest of its
             // slice back, and the first free account takes it over: the wave never waits on one account.
@@ -535,7 +540,7 @@ class JobRunner(
                 delay(wait)
                 continue
             }
-            store.saveProgress(job.id) { it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap()) }
+            store.saveProgress(job.id) { it.copy(lastId = it.waveEnd, waveStart = 0, waveEnd = 0, workerLast = emptyMap(), waveChunk = 0) }
             report.position(wave.waveEnd)
         }
     }
@@ -599,12 +604,21 @@ class JobRunner(
                 awaitNotPaused()
                 if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())
                 var sent = 0
-                if (msg.content.matches(job.mediaType)) {
+                if (filter.accepts(msg.content)) {
                     if (isArabicSkipped(msg)) {
                         log.info("[$tag · ${ac.tag}] דילוג על ${msg.id.serverId()} (ערבית)")
                     } else {
-                        when (val d = deliver(ac, chats.target.id, msg, null, floodHandOffAboveSec = FAST_HAND_OFF_SEC)) {
-                            Delivery.Sent -> sent = 1
+                        val d = deliver(
+                            ac, chats.target.id, msg, null, floodHandOffAboveSec = FAST_HAND_OFF_SEC, pauseAfter = false,
+                            onFloodWait = { s -> markHot(i, s) },
+                        )
+                        when (d) {
+                            Delivery.Sent -> {
+                                sent = 1
+                                // The pause after each copy; three times longer (at least 5 s) while the account is hot.
+                                val base = if (protection.isProtected) 0L else Random.nextLong(1_400, 3_800)
+                                delay(fastHot.restMs(i, base))
+                            }
                             is Delivery.FloodWait -> {
                                 // This message is not done: the account that takes the slice starts from it.
                                 log.warn("[$tag · ${ac.tag}] FloodWait ${d.seconds} שנ' — שאר החלק עובר לחשבון פנוי")
@@ -626,6 +640,13 @@ class JobRunner(
         return SliceEnd.Done
     }
 
+    /** Fast mode: account [i] got a FloodWait of [seconds] (or a stuck send): it is hot for a while. */
+    private fun markHot(i: Int, seconds: Int) {
+        val wasHot = fastHot.isHot(i)
+        fastHot.busy(i, System.currentTimeMillis() + (seconds + 1) * 1000L)
+        if (!wasHot) log.warn("[$tag · ${accounts[i].tag}] החשבון \"חם\" — מנוחה ארוכה יותר אחרי כל הודעה לזמן מה")
+    }
+
     // ── Delivery of one message, with FloodWait handled by retrying the same message. ──
 
     private suspend fun deliver(
@@ -639,6 +660,8 @@ class JobRunner(
         failHandOff: Boolean = false,
         /** The random pause after a server-side copy is taken here (false: the caller rests this account instead). */
         pauseAfter: Boolean = true,
+        /** Told of every FloodWait (seconds) and stuck send, also those waited out here. */
+        onFloodWait: (Int) -> Unit = {},
     ): Delivery {
         val sid = msg.id.serverId()
         val who = if (accounts.size > 1) "$tag · ${sender.tag}" else tag
@@ -651,6 +674,8 @@ class JobRunner(
         // A caption over the sender's limit: the media goes with its head, the rest follows as text right after it.
         var captionHead: FormattedText? = null
         var captionRest: FormattedText? = null
+        // A replaced caption refused as too long is tried once more as the original one, before it is split.
+        var keepOriginal = false
         try {
             while (true) {
                 awaitNotPaused()
@@ -690,7 +715,7 @@ class JobRunner(
                     }.also { uploadCopy = it }
                     Copier.uploadContent(msg, copy.absolutePath, job.stripLinks, captionHead)
                 } else {
-                    Copier.copyContent(msg, job.stripLinks, captionHead)
+                    Copier.copyContent(msg, job.stripLinks, captionHead, keepOriginalCaption = keepOriginal)
                 }
                 if (content == null) {
                     log.info("[$who] דילוג על $sid (ריק אחרי ניקוי קישורים)")
@@ -718,6 +743,7 @@ class JobRunner(
                     }
                     is SendOutcome.Failed -> {
                         if (r.retryAfterSec > 0) {
+                            onFloodWait(r.retryAfterSec)
                             if (floodHandOffAboveSec != null && r.retryAfterSec > floodHandOffAboveSec) {
                                 return Delivery.FloodWait(r.retryAfterSec)
                             }
@@ -732,6 +758,7 @@ class JobRunner(
                             log.warn("[$who] אין תשובה מטלגרם על הודעה $sid — שולח שוב (עדיף כפילות על הודעה חסרה)")
                         }
                         if (r.code == AccountClient.SEND_STUCK) {
+                            onFloodWait((SEND_STUCK_MS / 1000).toInt())
                             log.warn("[$who] שליחת הודעה $sid תקועה יותר מדקה וחצי (טלגרם מאט) — בוטלה ועוברת לחשבון אחר")
                             return Delivery.FloodWait((SEND_STUCK_MS / 1000).toInt())
                         }
@@ -740,14 +767,26 @@ class JobRunner(
                             if (!failHandOff) report.failed()
                             return Delivery.Failed
                         }
-                        if (isCaptionTooLong(r.message) && captionHead == null) {
-                            val full = msg.content.caption()?.let { cleanText(it, job.stripLinks) }
-                            if (full != null) {
-                                val (head, rest) = splitFormatted(full, CAPTION_LIMIT)
-                                captionHead = head
-                                captionRest = rest
-                                log.warn("[$who] הכיתוב של הודעה $sid ארוך מדי — שולח עם תחילת הכיתוב, והמשך כהודעת טקסט אחריה")
-                                continue
+                        if (isCaptionTooLong(r.message)) {
+                            val replaced = job.stripLinks && msg.content.caption() != null && !keepOriginal
+                            when (captionRetry(upload, replaced, keepOriginal, captionHead != null)) {
+                                CaptionStep.KeepOriginal -> {
+                                    keepOriginal = true
+                                    log.warn("[$who] הכיתוב של הודעה $sid ארוך מדי — מנסה שוב עם הכיתוב המקורי (הקישורים נשארים)")
+                                    continue
+                                }
+                                CaptionStep.Split -> {
+                                    val full = msg.content.caption()?.let { cleanText(it, job.stripLinks) }
+                                    if (full != null) {
+                                        val (head, rest) = splitFormatted(full, CAPTION_LIMIT)
+                                        captionHead = head
+                                        captionRest = rest
+                                        keepOriginal = false
+                                        log.warn("[$who] הכיתוב של הודעה $sid ארוך מדי — שולח עם תחילת הכיתוב, והמשך כהודעת טקסט אחריה")
+                                        continue
+                                    }
+                                }
+                                CaptionStep.GiveUp -> Unit
                             }
                         }
                         // (A timeout is not a refusal of the copy: it is retried as it was, not as an upload.)

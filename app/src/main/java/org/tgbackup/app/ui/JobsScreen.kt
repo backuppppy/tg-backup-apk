@@ -48,6 +48,10 @@ import org.tgbackup.app.data.Account
 import org.tgbackup.app.data.Job
 import org.tgbackup.app.data.JobMode
 import org.tgbackup.app.data.MediaType
+import org.tgbackup.app.engine.contentLabel
+import org.tgbackup.app.engine.copiesNothing
+import org.tgbackup.app.engine.legacyMediaType
+import org.tgbackup.app.engine.normalizeTypes
 import org.tgbackup.app.engine.JobStatus
 
 @Composable
@@ -163,7 +167,7 @@ private fun JobCard(
             }
             Text("${status.sourceTitle.ifBlank { job.source }}  ←  ${job.target}", style = MaterialTheme.typography.bodySmall)
             Text(
-                "${job.mediaType.label} · ${if (job.mode == JobMode.FAST) "מהיר" else "מסודר"}${if (job.viaTakeout) " · 📡 בלי הורדה" else ""} · חשבונות: " +
+                "${job.contentLabel()} · ${if (job.mode == JobMode.FAST) "מהיר" else "מסודר"}${if (job.viaTakeout) " · 📡 בלי הורדה" else ""} · חשבונות: " +
                     accNames.ifEmpty { listOf("—") }.joinToString(),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -218,7 +222,10 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var name by remember { mutableStateOf(initial.name) }
     var source by remember { mutableStateOf(initial.source) }
     var target by remember { mutableStateOf(initial.target) }
-    var mediaType by remember { mutableStateOf(initial.mediaType) }
+    var chosen by remember { mutableStateOf(editorChoices(initial)) }
+    // An old job saved untouched keeps its old type ("כל המדיה" also takes polls and locations, which no box covers).
+    val oldChoices = remember { if (initial.mediaTypes == null) editorChoices(initial) else null }
+    var extensions by remember { mutableStateOf(initial.extensions) }
     var mode by remember { mutableStateOf(initial.mode) }
     var selected by remember { mutableStateOf(initial.accountIds.toSet()) }
     var startFrom by remember { mutableStateOf(if (initial.startFromId > 0) initial.startFromId.toString() else "") }
@@ -226,7 +233,9 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var skipArabic by remember { mutableStateOf(initial.skipArabic) }
     var limit by remember { mutableStateOf(initial.perMinuteLimit.toString()) }
     var viaTakeout by remember { mutableStateOf(initial.viaTakeout) }
-    val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty()
+    val all = MediaType.ALL in chosen
+    val copiesNothing = copiesNothing(chosen.toList(), if (all) "" else extensions)
+    val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty() && !copiesNothing
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -241,7 +250,28 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                 OutlinedTextField(target, { target = it.trim() }, label = { Text("יעד: מזהה (עם או בלי ‎-100) / @username / קישור") }, singleLine = true)
 
                 Text("סוג תוכן", style = MaterialTheme.typography.labelLarge)
-                MediaType.entries.forEach { t -> RadioRow(t.label, mediaType == t) { mediaType = t } }
+                CONTENT_CHOICES.forEach { (t, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            // "הכל" clears every other choice, and any other choice clears "הכל".
+                            chosen = when {
+                                t in chosen -> chosen - t
+                                t == MediaType.ALL -> setOf(MediaType.ALL)
+                                else -> chosen - MediaType.ALL + t
+                            }
+                        },
+                    ) {
+                        Checkbox(checked = t in chosen, onCheckedChange = null)
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                OutlinedTextField(
+                    extensions, { extensions = it },
+                    label = { Text("סיומות קבצים (לא חובה), למשל pdf, zip") }, singleLine = true, enabled = !all,
+                )
+                if (!all) Text("קבצים עם הסיומות האלה יגובו בנוסף לסוגים שסימנת", style = MaterialTheme.typography.bodySmall)
+                if (copiesNothing) Text("בחר לפחות סוג תוכן אחד או סיומת", color = MaterialTheme.colorScheme.error)
 
                 Text("חשבונות (חשבון אחד — למשימה אחת בלבד)", style = MaterialTheme.typography.labelLarge)
                 if (accounts.isEmpty()) Text("אין חשבונות — הוסף בלשונית 'חשבונות'", color = MaterialTheme.colorScheme.error)
@@ -288,6 +318,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                     label = { Text("תקרת הודעות לדקה לחשבון (0 = ללא)") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
+                if (limitWarns(limit)) Text(LIMIT_WARNING, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(checked = strip, onCheckedChange = { strip = it })
                     Text("  הסר קישורים ותיוגים מהכיתוב")
@@ -305,7 +336,9 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                         name = name.trim(),
                         source = source,
                         target = target,
-                        mediaType = mediaType,
+                        mediaTypes = if (chosen == oldChoices && extensions.isBlank()) null else normalizeTypes(chosen.toList()),
+                        mediaType = if (chosen == oldChoices && extensions.isBlank()) initial.mediaType else legacyMediaType(normalizeTypes(chosen.toList())),
+                        extensions = if (all) "" else extensions.trim(),
                         mode = mode,
                         accountIds = accounts.map { it.id }.filter { it in selected },
                         startFromId = startFrom.toLongOrNull() ?: 0,
@@ -320,6 +353,29 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
         dismissButton = { TextButton(onClick = onDismiss) { Text("ביטול") } },
     )
 }
+
+/** The editor's content choices (multi-select); "הכל" excludes the others. */
+private val CONTENT_CHOICES = listOf(
+    MediaType.ALL to "הכל",
+    MediaType.PHOTO to "תמונות",
+    MediaType.VIDEO to "סרטונים",
+    MediaType.FILE to "קבצים",
+    MediaType.MUSIC to "מוזיקה",
+    MediaType.VOICE to "הודעות קוליות",
+    MediaType.TEXT to "טקסט",
+)
+
+/** A job saved before the multi-select opens with the boxes that mean the same. */
+private fun editorChoices(job: Job): Set<MediaType> = job.mediaTypes?.toSet() ?: when (job.mediaType) {
+    MediaType.VIDEO_DOC -> setOf(MediaType.VIDEO, MediaType.FILE, MediaType.MUSIC, MediaType.VOICE)
+    MediaType.ALL_MEDIA -> setOf(MediaType.PHOTO, MediaType.VIDEO, MediaType.FILE, MediaType.MUSIC, MediaType.VOICE)
+    else -> setOf(job.mediaType)
+}
+
+private const val LIMIT_WARNING = "מומלץ 25 (לכל היותר 30). מספר גבוה יותר עלול לגרום לטלגרם להגביל את החשבון או למחוק אותו."
+
+/** Above 30, or 0 (no limit); an empty field saves as 25, so no warning. */
+private fun limitWarns(s: String): Boolean = s.toIntOrNull()?.let { it == 0 || it > 30 } ?: false
 
 @Composable
 private fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {
