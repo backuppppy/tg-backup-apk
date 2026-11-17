@@ -122,6 +122,12 @@ class JobRunner(
 
         /** A read that takes longer than this is stuck (a FLOOD_WAIT TDLib waits out without telling us). */
         const val READ_STUCK_MS = 60_000L
+
+        /**
+         * A server-side copy still pending after this is stuck the same way: cancelled and handed over. Above TDLib's
+         * own silent FLOOD_WAIT limit (about 60 s), so a send TDLib is just retrying is not cut in the middle.
+         */
+        const val SEND_STUCK_MS = 90_000L
     }
     private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
 
@@ -647,7 +653,10 @@ class JobRunner(
                     report.phase("תקרת ${job.perMinuteLimit} הודעות לדקה — ממתין ${ms / 1000} שנ'")
                 }
                 report.phase(if (upload) "מעלה הודעה $sid" else "מעתיק הודעה $sid")
-                when (val r = sender.sendAndWait(target, content)) {
+                // In hand-off modes a server-side copy pending for a minute is cancelled and handed over (TDLib waits
+                // out a FLOOD_WAIT on sends silently). Uploads are never cut short: a big file may take that long.
+                val stuckAfter = if (floodHandOffAboveSec != null && !upload) SEND_STUCK_MS else null
+                when (val r = sender.sendAndWait(target, content, stuckAfter)) {
                     is SendOutcome.Sent -> {
                         report.copied()
                         report.delivered(target, r.messageId.serverId())
@@ -669,6 +678,10 @@ class JobRunner(
                         // rule), so it is retried like any refused send (and handed to the next account in ordered mode).
                         if (r.code == AccountClient.SEND_TIMEOUT) {
                             log.warn("[$who] אין תשובה מטלגרם על הודעה $sid — שולח שוב (עדיף כפילות על הודעה חסרה)")
+                        }
+                        if (r.code == AccountClient.SEND_STUCK) {
+                            log.warn("[$who] שליחת הודעה $sid תקועה יותר מדקה וחצי (טלגרם מאט) — בוטלה ועוברת לחשבון אחר")
+                            return Delivery.FloodWait((SEND_STUCK_MS / 1000).toInt())
                         }
                         if (r.code == AccountClient.SEND_DISCONNECTED) {
                             log.warn("[$who] החשבון התנתק לפני שהודעה $sid נשלחה")

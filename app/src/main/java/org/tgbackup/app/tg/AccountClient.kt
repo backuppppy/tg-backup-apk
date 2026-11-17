@@ -352,8 +352,13 @@ class AccountClient(
 
     // ── Sending ──────────────────────────────────────────────────────────────
 
-    /** Sends and waits until Telegram confirms (or rejects) the message. */
-    suspend fun sendAndWait(chatId: Long, content: InputMessageContent): SendOutcome {
+    /**
+     * Sends and waits until Telegram confirms (or rejects) the message. With [stuckAfterMs], a send still pending after
+     * that long is cancelled (TDLib waits out a FLOOD_WAIT on sends by itself and never says so): the pending message is
+     * deleted, which stops TDLib from sending it, and [SEND_STUCK] comes back so the caller hands it to another account.
+     * A request already on its way to Telegram may still land: then a duplicate, never a lost message.
+     */
+    suspend fun sendAndWait(chatId: Long, content: InputMessageContent, stuckAfterMs: Long? = null): SendOutcome {
         val tmp = when (val r = client.sendMessage(chatId = chatId, inputMessageContent = content)) {
             is TdlResult.Failure -> return SendOutcome.Failed(r.code, r.message, retryAfter(r.code, r.message))
             is TdlResult.Success -> r.result
@@ -365,21 +370,40 @@ class AccountClient(
             pendingSends.remove(tmp.id)
             return early
         }
-        // A logged-out or closed account never completes the send: that ends the wait too (its TDLib queue is gone,
-        // so the message will not go out later). A plain timeout is different: TDLib may still send it.
-        return withTimeoutOrNull(3.hours) {
-            coroutineScope {
-                val lost = async {
-                    auth.first { it !is AuthUi.Ready }
-                    SendOutcome.Failed(SEND_DISCONNECTED, "account disconnected", 0)
-                }
-                select<SendOutcome> {
-                    waiter.onAwait { it }
-                    lost.onAwait { it }
-                }.also { lost.cancel() }
+        if (stuckAfterMs != null) {
+            withTimeoutOrNull(stuckAfterMs) { waitSend(waiter) }?.let { out ->
+                if (out is SendOutcome.Failed) pendingSends.remove(tmp.id)
+                return out
             }
-        }?.also { if (it is SendOutcome.Failed) pendingSends.remove(tmp.id) }
+            // Deleting a pending message stops TDLib from sending it. If the request was already on its way to Telegram it
+            // still lands, unseen: then the next account sends a duplicate (the user's rule: a duplicate beats a gap).
+            client.deleteMessages(chatId, longArrayOf(tmp.id), true).errorText()?.let {
+                log.warn("[$tag] ביטול שליחה תקועה נכשל ($it) — ייתכן שתיווצר כפילות")
+            }
+            withTimeoutOrNull(5.seconds) { waiter.await() }?.let { out ->
+                if (out is SendOutcome.Sent) return out
+            }
+            pendingSends.remove(tmp.id)
+            return SendOutcome.Failed(SEND_STUCK, "send stuck, cancelled", 0)
+        }
+        // A plain 3-hour timeout is not cancelled: TDLib may still send it (see SEND_TIMEOUT).
+        return withTimeoutOrNull(3.hours) { waitSend(waiter) }?.also { if (it is SendOutcome.Failed) pendingSends.remove(tmp.id) }
             ?: SendOutcome.Failed(SEND_TIMEOUT, "timeout", 0).also { pendingSends.remove(tmp.id) }
+    }
+
+    /**
+     * The send's answer, or [SEND_DISCONNECTED] when the account logs out or closes first (its TDLib queue is gone,
+     * so the message will not go out later).
+     */
+    private suspend fun waitSend(waiter: CompletableDeferred<SendOutcome>): SendOutcome = coroutineScope {
+        val lost = async {
+            auth.first { it !is AuthUi.Ready }
+            SendOutcome.Failed(SEND_DISCONNECTED, "account disconnected", 0)
+        }
+        select<SendOutcome> {
+            waiter.onAwait { it }
+            lost.onAwait { it }
+        }.also { lost.cancel() }
     }
 
     private fun completeSend(oldId: Long, outcome: SendOutcome) {
@@ -409,6 +433,9 @@ class AccountClient(
 
         /** [SendOutcome.Failed] code: the account logged out or closed while the message was waiting (not sent). */
         const val SEND_DISCONNECTED = -2
+
+        /** [SendOutcome.Failed] code: pending longer than the caller's limit, then cancelled (not sent). */
+        const val SEND_STUCK = -3
 
         private const val CHANNEL_SHIFT = 1_000_000_000_000L
         private val retryRegex = Regex("""retry after (\d+)""", RegexOption.IGNORE_CASE)
