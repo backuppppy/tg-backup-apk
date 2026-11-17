@@ -40,6 +40,7 @@ import dev.g000sha256.tdl.dto.TextEntity
 import dev.g000sha256.tdl.dto.File as TdFile
 import org.tgbackup.app.data.MediaType
 import org.tgbackup.app.tg.AccountClient
+import org.tgbackup.app.tg.SendOutcome
 
 /** Classification of a source message for the media-type filter. */
 fun MessageContent.matches(type: MediaType): Boolean {
@@ -89,7 +90,7 @@ fun MessageContent.mainFile(): TdFile? = when (this) {
 object Copier {
 
     /** Server-side copy: no download, no "forwarded from" header, optionally with a cleaned caption. */
-    fun copyContent(msg: Message, strip: Boolean): InputMessageContent? {
+    fun copyContent(msg: Message, strip: Boolean, captionOverride: FormattedText? = null): InputMessageContent? {
         val content = msg.content
         if (content is MessageText) {
             // Messages with a link preview keep their link — the link is the content.
@@ -98,7 +99,7 @@ object Copier {
             return InputMessageText(text, null, false)
         }
         val caption = content.caption()
-        val replace = strip && caption != null
+        val replace = captionOverride != null || (strip && caption != null)
         return InputMessageForwarded(
             fromChatId = msg.chatId,
             messageId = msg.id,
@@ -108,16 +109,16 @@ object Copier {
             copyOptions = MessageCopyOptions(
                 sendCopy = true,
                 replaceCaption = replace,
-                newCaption = if (replace) cleanText(caption!!, true) else null,
+                newCaption = captionOverride ?: if (replace) cleanText(caption!!, true) else null,
                 newShowCaptionAboveMedia = false,
             ),
         )
     }
 
     /** Builds an upload of a file that was downloaded from a protected chat. */
-    fun uploadContent(msg: Message, path: String, strip: Boolean): InputMessageContent? {
+    fun uploadContent(msg: Message, path: String, strip: Boolean, captionOverride: FormattedText? = null): InputMessageContent? {
         val c = msg.content
-        val caption = c.caption()?.let { cleanText(it, strip) }
+        val caption = captionOverride ?: c.caption()?.let { cleanText(it, strip) }
         val file = InputFileLocal(path)
         return when (c) {
             is MessagePhoto -> {
@@ -148,4 +149,72 @@ object Copier {
 
     /** A downloaded file waiting to be uploaded; [owner] is the account whose cache holds it. */
     data class Downloaded(val owner: AccountClient, val fileId: Int, val path: String)
+}
+
+/**
+ * [text] cut in two so the head has at most [max] UTF-16 units: at the last whitespace in its second half, else at
+ * [max] (never inside a surrogate pair). Entities follow their text (one that crosses the cut is clipped to both
+ * parts). The rest is null when nothing is left. No text is dropped except the whitespace at the cut.
+ */
+fun splitFormatted(text: FormattedText, max: Int): Pair<FormattedText, FormattedText?> {
+    val s = text.text
+    if (s.length <= max) return text to null
+    var headEnd = (max downTo max / 2).firstOrNull { it < s.length && s[it].isWhitespace() } ?: max
+    if (headEnd == max && headEnd > 0 && s[headEnd - 1].isHighSurrogate()) headEnd--
+    val head = s.substring(0, headEnd).trimEnd()
+    var restStart = headEnd
+    while (restStart < s.length && s[restStart].isWhitespace()) restStart++
+    val rest = s.substring(restStart)
+    val headEntities = text.entities.mapNotNull { e ->
+        val end = minOf(e.offset + e.length, head.length)
+        if (end > e.offset) TextEntity(e.offset, end - e.offset, e.type) else null
+    }
+    val restEntities = text.entities.mapNotNull { e ->
+        val start = maxOf(e.offset, restStart)
+        val end = e.offset + e.length
+        if (end > start) TextEntity(start - restStart, end - start, e.type) else null
+    }
+    return FormattedText(head, headEntities.toTypedArray()) to
+        rest.takeIf { it.isNotEmpty() }?.let { FormattedText(it, restEntities.toTypedArray()) }
+}
+
+/** [text] in parts of at most [max] UTF-16 units each (see [splitFormatted]). */
+fun splitAll(text: FormattedText, max: Int): List<FormattedText> {
+    val out = ArrayList<FormattedText>()
+    var left: FormattedText? = text
+    while (left != null) {
+        val (head, rest) = splitFormatted(left, max)
+        out += head
+        left = rest
+    }
+    return out
+}
+
+/** Telegram refused a caption over the sender's limit (1024, 4096 with Premium). */
+fun isCaptionTooLong(message: String): Boolean {
+    val m = message.lowercase()
+    return "caption" in m && ("too long" in m || "too_long" in m)
+}
+
+/**
+ * The rest of a too-long caption, sent by [sender] to [target] as text messages right after its media (parts of at
+ * most 4096). Each part is tried 3 times; [warn] gets each failure. False when a part could not be sent.
+ */
+suspend fun sendCaptionRest(sender: AccountClient, target: Long, rest: FormattedText, warn: (String) -> Unit): Boolean {
+    var all = true
+    for (part in splitAll(rest, 4096)) {
+        var sent = false
+        for (attempt in 0 until 3) {
+            when (val r = sender.sendAndWait(target, InputMessageText(part, null, false))) {
+                is SendOutcome.Sent -> sent = true
+                is SendOutcome.Failed -> {
+                    warn("${r.code} ${r.message}")
+                    kotlinx.coroutines.delay(((r.retryAfterSec.takeIf { it > 0 } ?: 3) + 1) * 1000L * (attempt + 1))
+                }
+            }
+            if (sent) break
+        }
+        if (!sent) all = false
+    }
+    return all
 }

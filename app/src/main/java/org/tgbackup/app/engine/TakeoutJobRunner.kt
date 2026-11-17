@@ -1,5 +1,6 @@
 package org.tgbackup.app.engine
 
+import dev.g000sha256.tdl.dto.FormattedText
 import io.sentry.SentryLevel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -574,6 +575,9 @@ class TakeoutJobRunner(
         }
         var fileId = 0
         var copy: File? = null
+        // A caption over the sender's limit: the media goes with its head, the rest follows as text right after it.
+        var captionHead: FormattedText? = null
+        var captionRest: FormattedText? = null
         try {
             var attempts = 0
             while (true) {
@@ -602,7 +606,7 @@ class TakeoutJobRunner(
                     val dir = File(account.baseDir, "upload/$id").apply { mkdirs() }
                     File(dir, src.name).also { src.copyTo(it, overwrite = true) }
                 }.also { copy = it }
-                val content = Copier.uploadContent(msg, c.absolutePath, job.stripLinks) ?: run {
+                val content = Copier.uploadContent(msg, c.absolutePath, job.stripLinks, captionHead) ?: run {
                     problem("reupload-unsupported|${msg.content.javaClass.simpleName}", "re-upload skipped, content type not supported",
                         SentryLevel.INFO, mapOf("message_id" to id.toString()))
                     log.info("[$tag] דילוג על $id (סוג שלא ניתן להעלות)")
@@ -614,6 +618,10 @@ class TakeoutJobRunner(
                         report.copied()
                         report.delivered(targetChatId, r.messageId.serverId())
                         log.success("[$tag] הועתקה הודעה $id (הורדה והעלאה)")
+                        captionRest?.let { rest ->
+                            val ok = sendCaptionRest(account, targetChatId, rest) { log.warn("[$tag] שליחת המשך הכיתוב של $id נכשלה: $it") }
+                            if (!ok) log.error("[$tag] המשך הכיתוב של הודעה $id לא נשלח")
+                        }
                         return
                     }
                     is SendOutcome.Failed -> {
@@ -621,6 +629,15 @@ class TakeoutJobRunner(
                             report.phase("FloodWait — ממתין ${r.retryAfterSec} שנ'")
                             delay((r.retryAfterSec + 1) * 1000L)
                             continue
+                        }
+                        if (isCaptionTooLong(r.message) && captionHead == null) {
+                            msg.content.caption()?.let { cleanText(it, job.stripLinks) }?.let { full ->
+                                val (head, rest) = splitFormatted(full, 1024)
+                                captionHead = head
+                                captionRest = rest
+                                log.warn("[$tag] הכיתוב של הודעה $id ארוך מדי — שולח עם תחילת הכיתוב, והמשך כהודעת טקסט אחריה")
+                                continue
+                            }
                         }
                         log.error("[$tag] העלאת הודעה $id נכשלה: ${r.code} ${r.message}")
                         if (++attempts >= 3) {

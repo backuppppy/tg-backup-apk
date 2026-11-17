@@ -189,6 +189,16 @@ class TakeoutCopier(
      * Sends [msg] (read from [source]) to [target]. An expired file reference is refreshed
      * once by reading the message again. Flood waits are waited out by the client.
      */
+    /** The rest of a too-long caption, as text messages right after its media (flood waits are waited out by the client). */
+    private suspend fun sendCaptionRest(target: CopyPeer, rest: String?) {
+        if (rest.isNullOrEmpty()) return
+        for (part in splitTextAll(rest, TEXT_LIMIT)) {
+            client.invoke(
+                MTPmessages_SendMessage(vpeer = target.input, vmessage = part, vrandom_id = Random.nextLong(), ventities = null, is_no_webpage = true),
+            )
+        }
+    }
+
     suspend fun send(source: CopyPeer, target: CopyPeer, msg: MTPDmessage, stripLinks: Boolean): Sent {
         val media = msg.vmedia
         val keepLink = media is MTPDmessageMediaWebPage
@@ -230,6 +240,11 @@ class TakeoutCopier(
         var current = msg
         var refreshed = false
         var triedPublicRef = false
+        // A caption over the sender's limit (1024, 4096 with Premium): the media goes with its head and the rest follows
+        // as text right after it, so no text is lost. Its formatting is dropped then (the offsets would not fit).
+        var caption = text
+        var captionEntities = entities
+        var captionRest: String? = null
         while (true) {
             val input = inputMedia(current.vmedia) ?: return Sent.Skipped("סוג מדיה שלא נתמך")
             try {
@@ -237,13 +252,13 @@ class TakeoutCopier(
                     MTPmessages_SendMedia(
                         vpeer = target.input,
                         vmedia = input,
-                        vmessage = text,
+                        vmessage = caption,
                         vrandom_id = Random.nextLong(),
-                        ventities = entities,
+                        ventities = captionEntities,
                         is_invert_media = current.is_invert_media,
                     ),
                 )
-                return Sent.Ok(sentId(r))
+                return Sent.Ok(sentId(r)).also { sendCaptionRest(target, captionRest) }
             } catch (e: RpcError) {
                 when {
                     !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
@@ -256,9 +271,9 @@ class TakeoutCopier(
                                 MTPmessages_SendMedia(
                                     vpeer = target.input,
                                     vmedia = inputMedia(publicMedia)!!,
-                                    vmessage = text,
+                                    vmessage = caption,
                                     vrandom_id = Random.nextLong(),
-                                    ventities = entities,
+                                    ventities = captionEntities,
                                     is_invert_media = current.is_invert_media,
                                 ),
                             )
@@ -266,7 +281,14 @@ class TakeoutCopier(
                             if (e2.type != "CHAT_FORWARDS_RESTRICTED") throw e2
                             throw ForwardsRestricted("public-copy-restricted", why, e2)
                         }
-                        return Sent.Ok(sentId(r2))
+                        return Sent.Ok(sentId(r2)).also { sendCaptionRest(target, captionRest) }
+                    }
+                    captionRest == null && e.type == "MEDIA_CAPTION_TOO_LONG" -> {
+                        val (head, rest) = splitText(text, CAPTION_LIMIT)
+                        caption = head
+                        captionEntities = null
+                        captionRest = rest ?: ""
+                        log("caption of ${current.vid} is too long: its head goes with the media, the rest as text after it")
                     }
                     !refreshed && e.type.startsWith("FILE_REFERENCE_") -> {
                         refreshed = true
@@ -483,6 +505,10 @@ class TakeoutCopier(
     }
 
     companion object {
+        /** A caption may have this many characters without Premium; a text message, [TEXT_LIMIT]. */
+        const val CAPTION_LIMIT = 1024
+        const val TEXT_LIMIT = 4096
+
         const val MAX_FILE_SIZE = 4000L * 1024 * 1024
         const val GLOBAL_SEARCH_PAGES = 4
 

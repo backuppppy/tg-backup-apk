@@ -1,5 +1,7 @@
 package org.tgbackup.app.engine
 
+import dev.g000sha256.tdl.dto.InputMessageText
+import dev.g000sha256.tdl.dto.FormattedText
 import dev.g000sha256.tdl.dto.Chat
 import dev.g000sha256.tdl.dto.Message
 import dev.g000sha256.tdl.dto.MessageText
@@ -128,6 +130,9 @@ class JobRunner(
          * own silent FLOOD_WAIT limit (about 60 s), so a send TDLib is just retrying is not cut in the middle.
          */
         const val SEND_STUCK_MS = 90_000L
+
+        /** A caption may have this many characters without Premium. */
+        const val CAPTION_LIMIT = 1024
     }
     private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
 
@@ -232,6 +237,18 @@ class JobRunner(
             }
 
             val wanted = batch.filter { it.content.matches(job.mediaType) && !isArabicSkipped(it) }
+            // With turns, every other account reads the same ids once (one request each), so a send by it needs no
+            // request of its own per message.
+            val copies: Map<Int, Map<Long, Message>> = if (rotation == null) {
+                emptyMap()
+            } else {
+                (1 until accounts.size).filter { accounts[it].isReady }.map { i ->
+                    async {
+                        i to (withTimeoutOrNull(READ_STUCK_MS) { accounts[i].messagesByIds(src, ids) }?.getOrNull()
+                            ?.associateBy { it.id }.orEmpty())
+                    }
+                }.awaitAll().toMap()
+            }
             val prefetch = HashMap<Long, Deferred<Result<Copier.Downloaded>>>()
             val window = if (protection.isProtected) maxOf(2, accounts.size * 2) else 0
 
@@ -247,7 +264,7 @@ class JobRunner(
                     val ok = if (rotation == null) {
                         deliver(sender, dst, msg, prefetched) == Delivery.Sent
                     } else {
-                        deliverInTurns(rotation, chats, msg, prefetched)
+                        deliverInTurns(rotation, chats, msg, prefetched, copies)
                     }
                     if (ok) sent = 1
                 } else {
@@ -280,6 +297,8 @@ class JobRunner(
         chats: List<Pair2>,
         msg: Message,
         prefetched: Deferred<Result<Copier.Downloaded>>?,
+        /** The batch as read by each other account (by index), so its send needs no read of its own. */
+        copies: Map<Int, Map<Long, Message>> = emptyMap(),
     ): Boolean {
         val sid = msg.id.serverId()
         val tried = HashSet<Int>()
@@ -301,7 +320,7 @@ class JobRunner(
                         val i = pick.index
                         val ac = accounts[i]
                         // Each TDLib instance sends its own copy of the message.
-                        val own = if (i == 0) msg else ac.client.getMessage(msg.chatId, msg.id).getOrNull()
+                        val own = if (i == 0) msg else copies[i]?.get(msg.id) ?: ac.client.getMessage(msg.chatId, msg.id).getOrNull()
                         if (own == null) {
                             log.warn("[$tag · ${ac.tag}] לא רואה את הודעה $sid — עובר לחשבון הבא")
                             tried += i
@@ -603,6 +622,9 @@ class JobRunner(
         // Set when a server-side copy of this message failed: retry it as download + upload.
         var forceUpload = false
         var unusedPrefetch = prefetched
+        // A caption over the sender's limit: the media goes with its head, the rest follows as text right after it.
+        var captionHead: FormattedText? = null
+        var captionRest: FormattedText? = null
         try {
             while (true) {
                 awaitNotPaused()
@@ -640,9 +662,9 @@ class JobRunner(
                         if (!failHandOff) report.failed()
                         return Delivery.Failed
                     }.also { uploadCopy = it }
-                    Copier.uploadContent(msg, copy.absolutePath, job.stripLinks)
+                    Copier.uploadContent(msg, copy.absolutePath, job.stripLinks, captionHead)
                 } else {
-                    Copier.copyContent(msg, job.stripLinks)
+                    Copier.copyContent(msg, job.stripLinks, captionHead)
                 }
                 if (content == null) {
                     log.info("[$who] דילוג על $sid (ריק אחרי ניקוי קישורים)")
@@ -661,6 +683,10 @@ class JobRunner(
                         report.copied()
                         report.delivered(target, r.messageId.serverId())
                         log.success("[$who] הועתקה הודעה $sid")
+                        captionRest?.let { rest ->
+                            val ok = sendCaptionRest(sender, target, rest) { log.warn("[$who] שליחת המשך הכיתוב של $sid נכשלה: $it") }
+                            if (!ok) log.error("[$who] המשך הכיתוב של הודעה $sid לא נשלח")
+                        }
                         if (pauseAfter && !protection.isProtected) delay(Random.nextLong(1_400, 3_800))
                         return Delivery.Sent
                     }
@@ -687,6 +713,16 @@ class JobRunner(
                             log.warn("[$who] החשבון התנתק לפני שהודעה $sid נשלחה")
                             if (!failHandOff) report.failed()
                             return Delivery.Failed
+                        }
+                        if (isCaptionTooLong(r.message) && captionHead == null) {
+                            val full = msg.content.caption()?.let { cleanText(it, job.stripLinks) }
+                            if (full != null) {
+                                val (head, rest) = splitFormatted(full, CAPTION_LIMIT)
+                                captionHead = head
+                                captionRest = rest
+                                log.warn("[$who] הכיתוב של הודעה $sid ארוך מדי — שולח עם תחילת הכיתוב, והמשך כהודעת טקסט אחריה")
+                                continue
+                            }
                         }
                         // (A timeout is not a refusal of the copy: it is retried as it was, not as an upload.)
                         if (r.code != AccountClient.SEND_TIMEOUT && !upload && msg.content.mainFile() != null) {
