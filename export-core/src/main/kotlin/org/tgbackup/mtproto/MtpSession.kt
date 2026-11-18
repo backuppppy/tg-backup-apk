@@ -50,14 +50,25 @@ internal const val API_LAYER = 229
  * re-sending unanswered requests as needed.
  */
 internal class MtpSession(
-    private val dc: DcOption,
+    /** The DC's addresses, tried in turn: each failed connect moves to the next one. */
+    private val addresses: List<DcOption>,
     val authKey: AuthKey,
     @Volatile var serverSalt: Long,
     private val clock: MtpClock,
     private val app: AppInfo,
     private val log: (String) -> Unit,
     private val onBadMsgStorm: (BadMsgStorm) -> Unit = {},
+    /** Failed connects in a row before [ensureConnected] gives up with an [MtpException]. */
+    private val connectAttempts: Int = 8,
+    /** The wait after the n-th failed connect. */
+    private val backoffMs: (Int) -> Long = { attempt -> minOf(1000L * attempt, 10_000L) },
 ) {
+    init {
+        require(addresses.isNotEmpty()) { "no address" }
+    }
+
+    private val dc: DcOption = addresses.first()
+
     private class Pending(
         val body: ByteArray,
         val parse: (TlReader) -> Any?,
@@ -110,7 +121,11 @@ internal class MtpSession(
         return p.result.await() as R
     }
 
-    private suspend fun ensureConnected() {
+    /**
+     * Connects if not connected, trying [addresses] in turn; after [connectAttempts] failed connects in a row
+     * it throws, so a dead DC ends the caller's request instead of holding it for ever.
+     */
+    internal suspend fun ensureConnected() {
         if (invalidKey) throw AuthKeyInvalidException()
         if (tcp?.closed == false) return
         connectLock.withLock {
@@ -118,8 +133,9 @@ internal class MtpSession(
             var attempt = 0
             while (true) {
                 if (closed) throw MtpException("session closed")
+                val address = addresses[attempt % addresses.size]
                 try {
-                    val t = ObfuscatedTcp(dc.host, dc.port, dc.id)
+                    val t = ObfuscatedTcp(address.host, address.port, dc.id)
                     withContext(Dispatchers.IO) { t.connect() }
                     tcp = t
                     readerJob = scope.launch { readLoop(t) }
@@ -128,7 +144,8 @@ internal class MtpSession(
                 } catch (e: java.io.IOException) {
                     attempt++
                     log("connect to DC${dc.id} failed (${e.message}), retry $attempt")
-                    delay(minOf(1000L * attempt, 10_000L))
+                    if (attempt >= connectAttempts) throw MtpException("אין חיבור ל-DC${dc.id} אחרי $attempt ניסיונות")
+                    delay(backoffMs(attempt))
                 }
             }
         }

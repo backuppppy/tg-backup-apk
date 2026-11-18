@@ -26,12 +26,17 @@ internal class ObfuscatedTcp(private val host: String, private val port: Int, pr
     var closed = false
         private set
 
-    fun connect(timeoutMs: Int = 15_000) {
+    /**
+     * Opens the connection within [timeoutMs]. A [readTimeoutMs] above 0 makes each later read give up
+     * (a [java.net.SocketTimeoutException]) when the server sends nothing for that long; 0 waits for ever
+     * (a live session, whose ping loop notices a silent server).
+     */
+    fun connect(timeoutMs: Int = 15_000, readTimeoutMs: Int = 0) {
         socket = Socket()
         socket.tcpNoDelay = true
         socket.keepAlive = true
         socket.connect(InetSocketAddress(host, port), timeoutMs)
-        socket.soTimeout = 0
+        socket.soTimeout = readTimeoutMs
         input = DataInputStream(socket.getInputStream().buffered(64 * 1024))
         output = socket.getOutputStream()
 
