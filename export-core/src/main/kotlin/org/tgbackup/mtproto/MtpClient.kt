@@ -93,33 +93,39 @@ class MtpClient(
         val candidates = configOptions(dc)
         val ordered = if (kind == Kind.Media) candidates.filter { it.is_media_only } + candidates.filter { !it.is_media_only }
         else candidates.filter { !it.is_media_only }
-        return (ordered.map { DcOption(dc, it.vip_address, it.vport) } + builtInAddresses(dc)).distinctBy { it.host to it.port }
+        return (ordered.map { DcOption(dc, it.vip_address, it.vport) } +
+            dcAddresses(dc, configOptions(dc).filter { !it.is_media_only }.map { it.vip_address })).distinctBy { it.host to it.port }
     }
 
     /** Where to create [dc]'s auth key: the built-in address, then the config's non-media options. */
     private fun keyAddresses(dc: Int): List<DcOption> =
-        (listOf(builtIn(dc)) + configOptions(dc).filter { !it.is_media_only }.map { DcOption(dc, it.vip_address, it.vport) } +
-            builtInAddresses(dc)).distinctBy { it.host to it.port }
+        dcAddresses(dc, configOptions(dc).filter { !it.is_media_only }.map { it.vip_address })
 
-    /** Creates [dc]'s auth key at the first of [keyAddresses] that answers; each read waits at most 15 s. */
+    /**
+     * Creates [dc]'s auth key at the first of [keyAddresses] that answers, going through them [KEY_ROUNDS] times: on
+     * 18/11 the user's network dropped connections to Telegram's addresses at random (an address that timed out
+     * answered a minute later). Each connect waits at most 6 s, each read 15 s.
+     */
     private suspend fun createAuthKey(dc: Int): AuthKeyResult {
-        for (address in keyAddresses(dc)) {
-            try {
-                return withContext(Dispatchers.IO) {
-                    val t = ObfuscatedTcp(address.host, address.port, dc)
-                    try {
-                        // A blocked address fails fast enough to try the others (see builtInAddresses).
-                        t.connect(timeoutMs = 8_000, readTimeoutMs = 15_000)
-                        AuthKeyCreator(t, dc).create()
-                    } finally {
-                        t.close()
+        repeat(KEY_ROUNDS) { round ->
+            for (address in keyAddresses(dc)) {
+                try {
+                    return withContext(Dispatchers.IO) {
+                        val t = ObfuscatedTcp(address.host, address.port, dc)
+                        try {
+                            t.connect(timeoutMs = 6_000, readTimeoutMs = 15_000)
+                            AuthKeyCreator(t, dc).create()
+                        } finally {
+                            t.close()
+                        }
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log("creating auth key for DC$dc at ${address.host}:${address.port} failed (${e.javaClass.simpleName} ${e.message})")
                 }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log("creating auth key for DC$dc at ${address.host}:${address.port} failed (${e.javaClass.simpleName} ${e.message})")
             }
+            if (round < KEY_ROUNDS - 1) log("no address of DC$dc answered — trying them all again")
         }
         throw MtpException("DC$dc לא ענה בזמן יצירת המפתח")
     }
@@ -211,14 +217,20 @@ class MtpClient(
     }
 }
 
-/** Telegram's built-in addresses of each DC (as its desktop app keeps them), the first one being the main one. */
+/**
+ * Telegram's addresses of each DC, the first one being the main one: the ones its desktop app keeps built in, and the
+ * ones help.getConfig published on 18/11/2026 (so a login works even before the config is read, or when it is old).
+ */
 private val BUILT_IN_HOSTS: Map<Int, List<String>> = mapOf(
-    1 to listOf("149.154.175.50", "149.154.175.53"),
-    2 to listOf("149.154.167.51", "95.161.76.100"),
+    1 to listOf("149.154.175.50", "149.154.175.53", "149.154.175.57"),
+    2 to listOf("149.154.167.51", "95.161.76.100", "149.154.167.41"),
     3 to listOf("149.154.175.100"),
-    4 to listOf("149.154.167.91"),
-    5 to listOf("149.154.171.5", "91.108.56.130"),
+    4 to listOf("149.154.167.91", "149.154.167.92"),
+    5 to listOf("149.154.171.5", "91.108.56.130", "91.108.56.181"),
 )
+
+/** How many times the auth key creation goes through all of a DC's addresses. */
+private const val KEY_ROUNDS = 2
 
 /** The ports Telegram's servers answer on, the usual one first. */
 private val DC_PORTS = listOf(443, 80, 5222)
@@ -228,7 +240,14 @@ private val DC_PORTS = listOf(443, 80, 5222)
  * first login of a new account failed because 149.154.167.51:443 did not answer, from the phone and from the PC,
  * while TDLib (which tries other addresses and ports) connected.
  */
-fun builtInAddresses(dc: Int): List<DcOption> {
-    val hosts = BUILT_IN_HOSTS[dc] ?: throw MtpException("unknown DC $dc")
+fun builtInAddresses(dc: Int): List<DcOption> = dcAddresses(dc, emptyList())
+
+/**
+ * [dc]'s built-in hosts and the config's [configHosts] (not yet known ones added after the built-in ones), each on
+ * every port: all hosts on 443 first, then on 80, then on 5222.
+ */
+fun dcAddresses(dc: Int, configHosts: List<String>): List<DcOption> {
+    val builtIn = BUILT_IN_HOSTS[dc] ?: throw MtpException("unknown DC $dc")
+    val hosts = (builtIn + configHosts).distinct()
     return DC_PORTS.flatMap { port -> hosts.map { DcOption(dc, it, port) } }
 }

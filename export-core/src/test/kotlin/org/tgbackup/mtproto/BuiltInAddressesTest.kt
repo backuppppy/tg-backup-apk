@@ -9,9 +9,9 @@ class BuiltInAddressesTest {
     fun dc2TriesTheBackupAddressAndTheOtherPorts() {
         assertEquals(
             listOf(
-                "149.154.167.51:443", "95.161.76.100:443",
-                "149.154.167.51:80", "95.161.76.100:80",
-                "149.154.167.51:5222", "95.161.76.100:5222",
+                "149.154.167.51:443", "95.161.76.100:443", "149.154.167.41:443",
+                "149.154.167.51:80", "95.161.76.100:80", "149.154.167.41:80",
+                "149.154.167.51:5222", "95.161.76.100:5222", "149.154.167.41:5222",
             ),
             builtInAddresses(2).map { "${it.host}:${it.port}" },
         )
@@ -26,5 +26,21 @@ class BuiltInAddressesTest {
     @Test
     fun unknownDc() {
         assertFailsWith<MtpException> { builtInAddresses(9) }
+    }
+
+    @Test
+    fun dc4HasItsSecondAddressAndTheConfigOnesOnEveryPort() {
+        val a = dcAddresses(4, listOf("149.154.167.92", "149.154.165.250")).map { "${it.host}:${it.port}" }
+        assertEquals(
+            listOf("149.154.167.91", "149.154.167.92", "149.154.165.250").flatMap { h -> listOf(443, 80, 5222).map { "$h:$it" } }
+                .sortedBy { listOf(443, 80, 5222).indexOf(it.substringAfter(':').toInt()) },
+            a,
+        )
+    }
+
+    @Test
+    fun anExpiredQrTokenIsRecognized() {
+        kotlin.test.assertTrue(isTokenExpired(IllegalStateException("אישור ההתחברות נכשל: 400 AUTH_TOKEN_EXPIRED")))
+        kotlin.test.assertFalse(isTokenExpired(IllegalStateException("אישור ההתחברות נכשל: 400 AUTH_TOKEN_INVALID")))
     }
 }

@@ -58,6 +58,7 @@ class MtpLogin(private val client: MtpClient) {
     ) {
         client.loadConfig()
         var confirmed = false
+        var expired = 0
         repeat(20) {
             val result = try {
                 client.invoke(MTPauth_ExportLoginToken(client.app.apiId, client.apiHash, emptyList()))
@@ -73,8 +74,15 @@ class MtpLogin(private val client: MtpClient) {
                 is MTPDauth_loginToken -> {
                     if (!confirmed) {
                         val link = "tg://login?token=" + org.tgbackup.mtproto.B64.urlNoPad(r.vtoken)
-                        confirm(link)
-                        confirmed = true
+                        try {
+                            confirm(link)
+                            confirmed = true
+                        } catch (e: Exception) {
+                            // The token lives about 30 s: on a slow network it can expire before the confirmation
+                            // arrives (Sentry TGBACKUP-DESKTOP-4, 18/11). Ask a fresh token and confirm that one.
+                            if (!isTokenExpired(e) || ++expired > MAX_EXPIRED_TOKENS) throw e
+                            return@repeat
+                        }
                     }
                     delay(1500)
                 }
@@ -209,4 +217,11 @@ internal object Srp {
             return MTPDinputCheckPasswordSRP(srpId, pad(gA), m1)
         }
     }
+}
+
+/** Expired QR tokens in a row that are replaced by fresh ones before the login gives up. */
+private const val MAX_EXPIRED_TOKENS = 3
+
+internal fun isTokenExpired(e: Throwable): Boolean = generateSequence(e) { it.cause }.any {
+    (it as? RpcError)?.type == "AUTH_TOKEN_EXPIRED" || it.message?.contains("AUTH_TOKEN_EXPIRED") == true
 }
