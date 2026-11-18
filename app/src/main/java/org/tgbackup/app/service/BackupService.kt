@@ -67,7 +67,7 @@ class BackupService : Service() {
                 if (active.isEmpty()) return@combine export
                 val copied = active.values.sumOf { it.copied }
                 val names = active.keys.mapNotNull { id -> cfg.jobs.firstOrNull { it.id == id }?.name?.ifBlank { null } }
-                val head = "${active.size} משימות פעילות · הועתקו $copied" + if (export != null) " · ${export.first}" else ""
+                val head = "${active.size} משימות פעילות · הועתקו בהרצה זו $copied" + if (export != null) " · ${export.first}" else ""
                 val detail = active.values.firstOrNull()?.phase.orEmpty()
                 head to (if (names.isNotEmpty()) names.joinToString() + " — " else "") + detail
             }.collect { info ->

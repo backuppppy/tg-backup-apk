@@ -73,6 +73,16 @@ data class Progress(
     val viaTakeout: Boolean = false,
     /** TDLib chat id of the source this progress belongs to; 0 = unknown (progress written before this field existed). */
     val sourceId: Long = 0,
+    /** Messages copied by this job over all its runs (a stop does not clear it; "reset progress" does). */
+    val copiedTotal: Long = 0,
+    /** Time the job spent running over all its runs, pauses excluded. */
+    val runMillis: Long = 0,
+    /** Server id of the source's newest message when it was last read; 0 = not known yet. */
+    val latestId: Long = 0,
     /** Fast mode: the slice size the saved wave was opened with; 0 = saved before this field (25). */
     val waveChunk: Int = 0,
-)
+) {
+    /** This progress with the run totals of [prev]: for the places that start the position over. */
+    fun withTotalsOf(prev: Progress) =
+        copy(copiedTotal = prev.copiedTotal, runMillis = prev.runMillis, latestId = prev.latestId)
+}

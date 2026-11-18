@@ -81,7 +81,7 @@ interface JobReporter {
     fun copied()
 
     /** The source's newest message is [id] (server id), as read by latestServerId. */
-    fun latest(id: Long) {}
+    fun latest(id: Long)
 
     /** A message was sent to [chatId]; [serverId] is its id as shown in t.me links. */
     fun delivered(chatId: Long, serverId: Long)
@@ -182,7 +182,7 @@ class JobRunner(
         if (protection.isProtected) log.warn("[$tag] ערוץ המקור מוגן — מצב הורדה והעלאה מחדש")
 
         if (job.startFromId > 0) {
-            store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1) }
+            store.saveProgress(job.id) { Progress(lastId = job.startFromId - 1).withTotalsOf(it) }
             clearStartFrom()
             log.info("[$tag] מתחיל מהודעה ${job.startFromId}")
         }
@@ -303,7 +303,7 @@ class JobRunner(
                     )
                 }
                 last = msg.id.serverId()
-                store.saveProgress(job.id) { it.copy(lastId = last) }
+                store.saveProgress(job.id) { it.copy(lastId = last, copiedTotal = it.copiedTotal + sent) }
                 report.position(last)
             }
             prefetch.values.forEach { discard(it) }
@@ -631,7 +631,7 @@ class JobRunner(
                     }
                 }
                 last = msg.id.serverId()
-                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (slice to last)) }
+                store.saveProgress(job.id) { it.copy(workerLast = it.workerLast + (slice to last), copiedTotal = it.copiedTotal + sent) }
             }
             // Every id of the slice was read: deleted ones (missing from the result) are passed too.
             last = re

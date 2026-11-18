@@ -9,7 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import org.tgbackup.app.tg.AuthUi
 import org.tgbackup.app.data.Store
 import org.tgbackup.app.engine.JobManager
 import org.tgbackup.app.engine.LogBus
@@ -54,6 +58,23 @@ class App : Application() {
         // Keep one TDLib client per configured account.
         scope.launch {
             store.config.map { it.accounts }.distinctUntilChanged().collect { accounts.sync(it) }
+        }
+        // The source's latest id of every job ("מתוך Y" on its card), read without running it: whenever an account
+        // of the job logs in (which is also how a saved session comes back after launch).
+        scope.launch {
+            accounts.clients.collectLatest { clients ->
+                coroutineScope {
+                    clients.forEach { (id, client) ->
+                        launch {
+                            client.auth.map { it is AuthUi.Ready }.distinctUntilChanged().filter { it }.collect {
+                                store.config.value.jobs.filter { id in it.accountIds }.forEach { j ->
+                                    launch { runCatching { jobs.refreshLatest(j.id) } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         // A foreground service holds the process alive whenever any job runs.
         scope.launch {

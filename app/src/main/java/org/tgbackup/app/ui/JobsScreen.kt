@@ -32,10 +32,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +46,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.tgbackup.app.App
 import org.tgbackup.app.data.Account
 import org.tgbackup.app.data.Job
@@ -63,6 +68,13 @@ fun JobsScreen() {
     var editing by remember { mutableStateOf<Job?>(null) }
     var deleting by remember { mutableStateOf<Job?>(null) }
     var resetting by remember { mutableStateOf<Job?>(null) }
+    val screenScope = rememberCoroutineScope()
+    // A job shown without its source's latest id asks for it once (the "מתוך Y" of its card).
+    LaunchedEffect(cfg.jobs.map { it.id }) {
+        cfg.jobs.filter { (app.jobs.statuses.value[it.id]?.latestId ?: 0L) <= 0L }.forEach { j ->
+            launch { runCatching { app.jobs.refreshLatest(j.id) } }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(12.dp),
@@ -70,11 +82,11 @@ fun JobsScreen() {
     ) {
         item {
             val active = statuses.values.filter { it.running }
-            val total = statuses.values.sumOf { it.copied }
+            val total = formatCount(statuses.values.sumOf { it.copiedTotal })
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    if (active.isEmpty()) "⚪ עצור · הועתקו בהרצה זו: $total"
-                    else "🟢 ${active.size} משימות פעילות · הועתקו בהרצה זו: $total",
+                    if (active.isEmpty()) "⚪ עצור · הועתקו: $total"
+                    else "🟢 ${active.size} משימות פעילות · הועתקו: $total",
                     style = MaterialTheme.typography.titleSmall,
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -109,6 +121,12 @@ fun JobsScreen() {
     editing?.let { job ->
         val usedElsewhere = cfg.jobs.filter { it.id != job.id }.flatMap { it.accountIds }.toSet()
         JobDialog(job, cfg.accounts, usedElsewhere, onDismiss = { editing = null }) { saved ->
+            // As on the desktop: a new source starts the job over (position and run totals), then its latest id is read.
+            val old = cfg.jobs.firstOrNull { it.id == saved.id }
+            if (old != null && old.source != saved.source) {
+                app.jobs.resetProgress(saved.id)
+                screenScope.launch { runCatching { app.jobs.refreshLatest(saved.id) } }
+            }
             app.store.updateConfig { c ->
                 val exists = c.jobs.any { it.id == saved.id }
                 c.copy(jobs = if (exists) c.jobs.map { if (it.id == saved.id) saved else it } else c.jobs + saved)
@@ -118,8 +136,9 @@ fun JobsScreen() {
     }
     deleting?.let { job ->
         ConfirmDialog("למחוק את המשימה ${job.name}?", "ההתקדמות השמורה תימחק.", onDismiss = { deleting = null }) {
-            app.jobs.forget(job.id)
+            // The config first: the engine saves a latest id only for a job still in it (as the desktop does).
             app.store.updateConfig { c -> c.copy(jobs = c.jobs.filter { it.id != job.id }) }
+            app.jobs.forget(job.id)
             deleting = null
         }
     }
@@ -174,29 +193,39 @@ private fun JobCard(
             if (job.viaTakeout) Text("📡 קריאה דרך סשן הייצוא ושליחה בלי הורדה", style = MaterialTheme.typography.bodySmall)
             else if (status.isProtected) Text("🔒 ערוץ מוגן — הורדה והעלאה מחדש", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
+            // The desktop's card: every message number opens that message in Telegram.
             if (running) {
-                // Tapping the phase opens the last message copied into the target.
-                val targetLink = status.lastTargetLink
-                Text(
-                    status.phase,
-                    color = MaterialTheme.colorScheme.primary,
-                    textDecoration = if (targetLink != null) TextDecoration.Underline else null,
-                    modifier = if (targetLink != null) Modifier.clickable {
-                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetLink))) }
-                    } else Modifier,
-                )
+                LinkText(phaseText(status.phase), status.lastTargetLink, MaterialTheme.colorScheme.primary)
             }
-            Text("הועתקו בהרצה זו: ${status.copied}" + if (status.failed > 0) " · נכשלו: ${status.failed}" else "")
             if (status.lastId > 0) {
-                val link = status.lastLink
-                Text(
-                    "הודעה אחרונה שטופלה: ${status.lastId}",
-                    color = if (link != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                    textDecoration = if (link != null) TextDecoration.Underline else null,
-                    modifier = if (link != null) Modifier.clickable {
-                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
-                    } else Modifier,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("הודעה אחרונה שטופלה מהמקור: ")
+                    LinkText(status.lastId.toString(), status.lastLink)
+                }
+            }
+            Text("הועתקו: ${formatCount(status.copiedTotal)}" + if (status.failed > 0) " · נכשלו: ${formatCount(status.failed.toLong())}" else "")
+            if (status.lastId > 0 || status.latestId > 0) {
+                FlowRow(verticalArrangement = Arrangement.Center) {
+                    Text("אוחז במקור ב-id ")
+                    LinkText(formatCount(status.lastId), status.lastLink)
+                    if (status.latestId > 0) {
+                        Text(" מתוך ")
+                        LinkText(formatCount(status.latestId), status.latestLink)
+                    }
+                }
+            }
+            if (runTimeShown(status)) {
+                // Ticks once a second only while the clock runs.
+                var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                if (status.runningSince > 0) {
+                    LaunchedEffect(status.runningSince) {
+                        while (true) {
+                            now = System.currentTimeMillis()
+                            delay(1_000)
+                        }
+                    }
+                }
+                Text("⏱ רץ: ${formatRunTime(runMillisAt(status, now))}")
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!running) {
@@ -376,6 +405,20 @@ private const val LIMIT_WARNING = "מומלץ 25 (לכל היותר 30). מספ�
 
 /** Above 30, or 0 (no limit); an empty field saves as 25, so no warning. */
 private fun limitWarns(s: String): Boolean = s.toIntOrNull()?.let { it == 0 || it > 30 } ?: false
+
+/** A text that opens [link] in Telegram when tapped; plain text without a link. */
+@Composable
+private fun LinkText(text: String, link: String?, plainColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface) {
+    val context = LocalContext.current
+    Text(
+        text,
+        color = if (link != null) MaterialTheme.colorScheme.primary else plainColor,
+        textDecoration = if (link != null) TextDecoration.Underline else null,
+        modifier = if (link != null) Modifier.clickable {
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
+        } else Modifier,
+    )
+}
 
 @Composable
 private fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {

@@ -4,10 +4,17 @@ package org.tgbackup.copy
 object TakeoutDiagnostics {
     data class Slice(val index: Int, val start: Long, val end: Long)
 
-    /** Splits wave [ws]..[we] into one slice of up to [chunk] ids per worker; trailing workers may get none. */
-    fun slices(ws: Long, we: Long, workers: Int, chunk: Int): List<Slice> = (0 until workers).mapNotNull { i ->
-        val rs = ws + i.toLong() * chunk
-        if (rs > we) null else Slice(i, rs, minOf(rs + chunk - 1, we))
+    /**
+     * Splits wave [ws]..[we] into slices of up to [chunk] ids, from the wave's range: a wave saved with more accounts
+     * than [workers] keeps all its slices (the runner gives slice k to worker k % workers). No workers, no slices.
+     */
+    fun slices(ws: Long, we: Long, workers: Int, chunk: Int): List<Slice> {
+        if (workers <= 0 || chunk <= 0 || we < ws) return emptyList()
+        val count = ((we - ws) / chunk + 1).toInt()
+        return (0 until count).map { i ->
+            val rs = ws + i.toLong() * chunk
+            Slice(i, rs, minOf(rs + chunk - 1, we))
+        }
     }
 
     /** A new wave opens past the id right after the last finished one. */

@@ -15,6 +15,13 @@ class TakeoutDiagnosticsTest {
         val s = TakeoutDiagnostics.slices(100, 130, 3, 25)
         assertEquals(listOf(100L to 124L, 125L to 130L), s.map { it.start to it.end })
     }
+    @Test fun aWaveSavedWithMoreAccountsKeepsAllItsSlices() {
+        // Saved with 3 accounts (3 × 25), resumed with 2: the third slice is still there.
+        val s = TakeoutDiagnostics.slices(2401, 2475, 2, 25)
+        assertEquals(listOf(2401L to 2425L, 2426L to 2450L, 2451L to 2475L), s.map { it.start to it.end })
+        assertEquals(listOf(0, 1, 2), s.map { it.index })
+    }
+
     @Test fun slicesEmptyWhenNoWorkers() = assertTrue(TakeoutDiagnostics.slices(1, 50, 0, 25).isEmpty())
 
     @Test fun waveJumpOnlyWhenGap() {
