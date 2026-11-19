@@ -20,3 +20,6 @@ fun waveSliceSize(waveChunk: Int): Int = if (waveChunk > 0) waveChunk else DEFAU
 
 const val DEFAULT_SLICE = 25
 const val MAX_SLICE = 100
+
+/** The most messages one account sends in a row in ordered mode (Job.messagesPerTurn). */
+const val MAX_MESSAGES_PER_TURN = 10

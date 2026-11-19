@@ -168,7 +168,7 @@ private fun ExportSetup() {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text("חשבון:", style = MaterialTheme.typography.labelLarge)
-                    for (acc in cfg.accounts) {
+                    for (acc in cfg.accounts.filter { !it.isBot }) { // a bot has no export session
                         val auth by (clients[acc.id]?.auth ?: remember { MutableStateFlow<AuthUi>(AuthUi.Closed) }).collectAsState()
                         Row(
                             Modifier.fillMaxWidth().selectable(selected = acc.id == accountId, onClick = { accountId = acc.id }),

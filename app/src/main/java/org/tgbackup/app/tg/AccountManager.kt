@@ -28,7 +28,8 @@ class AccountManager(private val rootDir: File, private val log: LogBus) {
         for ((id, client) in current.toMap()) {
             val acc = wanted[id]
             val credentialsChanged = acc != null &&
-                (acc.apiId != client.account.apiId || acc.apiHash != client.account.apiHash || acc.phone != client.account.phone)
+                (acc.apiId != client.account.apiId || acc.apiHash != client.account.apiHash || acc.phone != client.account.phone ||
+                    acc.botToken != client.account.botToken)
             if (acc == null || credentialsChanged) {
                 client.close()
                 current.remove(id)

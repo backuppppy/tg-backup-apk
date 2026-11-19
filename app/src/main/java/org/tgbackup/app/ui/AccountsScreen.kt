@@ -63,9 +63,31 @@ fun AccountsScreen() {
         item {
             Button(onClick = { editing = Account() }, modifier = Modifier.fillMaxWidth()) { Text("➕ הוסף חשבון") }
         }
+        item {
+            // A bot helps jobs send; it needs a regular account first (its API ID / Hash, and someone to read the source).
+            OutlinedButton(
+                onClick = { editing = Account(botToken = BOT_DRAFT) },
+                enabled = cfg.accounts.any { !it.isBot },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("🤖 הוסף בוט") }
+            if (cfg.accounts.none { !it.isBot }) {
+                Text("כדי להוסיף בוט צריך קודם חשבון רגיל אחד.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 
     editing?.let { acc ->
+        val save: (Account) -> Unit = { saved ->
+            app.store.updateConfig { c ->
+                val exists = c.accounts.any { it.id == saved.id }
+                c.copy(accounts = if (exists) c.accounts.map { if (it.id == saved.id) saved else it } else c.accounts + saved)
+            }
+            editing = null
+        }
+        if (acc.isBot) {
+            BotDialog(acc, apiFrom = cfg.accounts.firstOrNull { !it.isBot }, onDismiss = { editing = null }, onSave = save)
+            return@let
+        }
         AccountDialog(acc, onDismiss = { editing = null }) { saved ->
             app.store.updateConfig { c ->
                 val exists = c.accounts.any { it.id == saved.id }
@@ -123,7 +145,7 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(acc.name.ifBlank { "ללא שם" }, style = MaterialTheme.typography.titleMedium)
-            Text(acc.phone, style = MaterialTheme.typography.bodySmall)
+            Text(if (acc.isBot) "🤖 בוט — עוזר לשלוח במשימות" else acc.phone, style = MaterialTheme.typography.bodySmall)
 
             // ── Regular (TDLib) session ──────────────────────────────────────
             val regularColor = when (auth) {
@@ -131,13 +153,13 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
                 is AuthUi.Unsupported -> MaterialTheme.colorScheme.error
                 else -> MaterialTheme.colorScheme.onSurface
             }
-            val regularText = (auth as? AuthUi.Ready)?.let { "✅ סשן רגיל: מחובר כ-${it.display}" }
-                ?: "📱 סשן רגיל: ${auth.label}"
+            val regularText = (auth as? AuthUi.Ready)?.let { if (acc.isBot) "🤖 בוט מחובר כ-${it.display}" else "✅ סשן רגיל: מחובר כ-${it.display}" }
+                ?: if (acc.isBot) "🤖 בוט: ${auth.label}" else "📱 סשן רגיל: ${auth.label}"
             Text(regularText, color = regularColor)
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
-            // ── Export (MTProto) session ─────────────────────────────────────
-            if (auth is AuthUi.Ready) {
+            // ── Export (MTProto) session (a bot has none) ────────────────────
+            if (auth is AuthUi.Ready && !acc.isBot) {
                 val now = (System.currentTimeMillis() / 1000).toInt()
                 val availAt = exportPrefs.availableAt[acc.id] ?: 0
                 val (exportText, exportColor) = when {
@@ -194,7 +216,7 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
             }
 
             // ── Export session buttons ───────────────────────────────────────
-            if (auth is AuthUi.Ready) {
+            if (auth is AuthUi.Ready && !acc.isBot) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     when {
                         exportLoggedIn == false -> OutlinedButton(enabled = !exportBusy, onClick = {
@@ -254,6 +276,49 @@ private fun AccountDialog(initial: Account, onDismiss: () -> Unit, onSave: (Acco
         confirmButton = {
             Button(enabled = valid, onClick = {
                 onSave(initial.copy(name = name.trim(), apiId = apiId.toInt(), apiHash = apiHash, phone = phone.trim()))
+            }) { Text("שמור") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("ביטול") } },
+    )
+}
+
+/** Marks a new bot in the dialog before its token is typed (never saved: the dialog requires a real token). */
+private const val BOT_DRAFT = "-"
+
+/** A token as @BotFather gives it: the bot's id, a colon, and the secret. */
+private fun isBotToken(s: String): Boolean = Regex("""^\d{5,}:[A-Za-z0-9_-]{30,}$""").matches(s.trim())
+
+@Composable
+private fun BotDialog(initial: Account, apiFrom: Account?, onDismiss: () -> Unit, onSave: (Account) -> Unit) {
+    val isNew = initial.botToken == BOT_DRAFT
+    var name by remember { mutableStateOf(initial.name) }
+    var token by remember { mutableStateOf(if (isNew) "" else initial.botToken) }
+    // The API ID / Hash come from the first regular account (a bot still needs them to log in).
+    val apiId = if (initial.apiId != 0) initial.apiId else apiFrom?.apiId ?: 0
+    val apiHash = initial.apiHash.ifBlank { apiFrom?.apiHash.orEmpty() }
+    val valid = isBotToken(token) && apiId != 0 && apiHash.length >= 16
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (isNew) "🤖 בוט חדש" else "עריכת בוט") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "הבוט רק עוזר לשלוח. צריך להוסיף אותו כמנהל בערוץ היעד, וכחבר או מנהל בערוץ המקור. " +
+                        "הוא לא עובד עם \"בלי הורדה\", ושולח עד 20 הודעות בדקה.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(name, { name = it }, label = { Text("שם") }, singleLine = true)
+                OutlinedTextField(
+                    token, { token = it.trim() }, label = { Text("טוקן הבוט (מ-@BotFather)") }, singleLine = true,
+                    isError = token.isNotEmpty() && !isBotToken(token),
+                    supportingText = { Text("נראה כך: 123456789:AA...") },
+                )
+            }
+        },
+        confirmButton = {
+            Button(enabled = valid, onClick = {
+                onSave(initial.copy(name = name.trim(), apiId = apiId, apiHash = apiHash, phone = "", botToken = token.trim()))
             }) { Text("שמור") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("ביטול") } },

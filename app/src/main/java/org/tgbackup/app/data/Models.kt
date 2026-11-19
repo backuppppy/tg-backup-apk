@@ -10,7 +10,12 @@ data class Account(
     val apiId: Int = 0,
     val apiHash: String = "",
     val phone: String = "",
-)
+    /** A bot's token from @BotFather; blank for a regular account. A bot logs in with it (no phone, no code). */
+    val botToken: String = "",
+) {
+    /** A bot helps a job send; it cannot read a chat's history, load chat lists, or open an export session. */
+    val isBot: Boolean get() = botToken.isNotBlank()
+}
 
 @Serializable
 enum class MediaType(val label: String) {
@@ -52,6 +57,8 @@ data class Job(
     val mediaTypes: List<MediaType>? = null,
     /** Optional file extensions ("pdf, zip"): such files are copied in addition to [mediaTypes]. */
     val extensions: String = "",
+    /** Ordered mode with several senders: messages each account sends in a row before the turn passes on (1..10). */
+    val messagesPerTurn: Int = 3,
 )
 
 @Serializable

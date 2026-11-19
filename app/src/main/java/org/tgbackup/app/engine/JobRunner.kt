@@ -140,7 +140,7 @@ class JobRunner(
         /** A caption may have this many characters without Premium. */
         const val CAPTION_LIMIT = 1024
     }
-    private val limiters = accounts.associate { it.account.id to RateLimiter(job.perMinuteLimit) }
+    private val limiters = accounts.associate { it.account.id to RateLimiter(senderLimit(job.perMinuteLimit, it.account.isBot)) }
 
     private class Pair2(val source: Chat, val target: Chat)
 
@@ -238,7 +238,11 @@ class JobRunner(
     private suspend fun runOrdered(chats: List<Pair2>) = coroutineScope {
         val sender = accounts[0]
         // Several accounts send in turns, one message at a time (the order stays the source's); one account as before.
-        val rotation = if (accounts.size > 1) SenderRotation(accounts.size) else null
+        val rotation = if (accounts.size > 1) {
+            SenderRotation(accounts.size, turnSize = job.messagesPerTurn.coerceIn(1, MAX_MESSAGES_PER_TURN))
+        } else {
+            null
+        }
         val src = chats[0].source.id
         val dst = chats[0].target.id
         var last = store.progress(job.id).lastId
@@ -364,7 +368,8 @@ class JobRunner(
                         when (val d = deliver(ac, chats[i].target.id, own, pre, floodHandOffAboveSec = 0, failHandOff = true, pauseAfter = false)) {
                             Delivery.Sent -> {
                                 val base = if (protection.isProtected) 0L else Random.nextLong(1_400, 3_800)
-                                rotation.rest(i, System.currentTimeMillis() + rotation.restMs(i, base))
+                                // The rest comes when the account's turn of [Job.messagesPerTurn] messages is over.
+                                rotation.sent(i, rotation.restMs(i, base))
                                 return true
                             }
                             Delivery.Skipped -> return false
@@ -600,9 +605,17 @@ class JobRunner(
             }
             val inRange = read.getOrElse { e ->
                 log.error("[$tag · ${ac.tag}] קריאת הודעות נכשלה: ${e.message}")
+                // A bot that cannot read the source never will: the slice goes to a regular account.
+                if (ac.account.isBot) return SliceEnd.Released(System.currentTimeMillis() + READ_STUCK_MS)
                 delay(15_000)
                 null
             } ?: continue
+            // A bot that gets nothing back may not see the source: a regular account reads the slice (and passes
+            // deleted messages), so nothing is skipped unseen.
+            if (inRange.isEmpty() && ac.account.isBot) {
+                log.warn("[$tag · ${ac.tag}] הבוט לא קיבל הודעות ${ids.first}–${ids.last} — החלק עובר לחשבון רגיל")
+                return SliceEnd.Released(System.currentTimeMillis() + READ_STUCK_MS)
+            }
             for (msg in inRange) {
                 awaitNotPaused()
                 if (!ac.isReady) return SliceEnd.Released(System.currentTimeMillis())

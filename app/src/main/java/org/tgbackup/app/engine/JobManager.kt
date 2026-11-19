@@ -240,8 +240,10 @@ class JobManager(
                     withTimeoutOrNull(10_000) {
                         accounts.clients.first { m -> current.accountIds.any { it in m } }
                     }
-                    val clients = current.accountIds.mapNotNull { accounts[it] }
+                    // Regular accounts first: the first one reads the source, and a bot cannot (see botRule).
+                    val clients = current.accountIds.mapNotNull { accounts[it] }.sortedBy { it.account.isBot }
                     if (clients.isEmpty()) error("אף אחד מהחשבונות של המשימה לא מוגדר עם API ID")
+                    botRule(clients.map { it.account }, current.viaTakeout)?.let { error(it) }
                     log.info("[$label] מתחיל…")
                     val clearStartFrom = {
                         store.updateConfig { c ->

@@ -52,6 +52,8 @@ import org.tgbackup.app.App
 import org.tgbackup.app.data.Account
 import org.tgbackup.app.data.Job
 import org.tgbackup.app.data.JobMode
+import org.tgbackup.app.engine.MAX_MESSAGES_PER_TURN
+import org.tgbackup.app.engine.botRule
 import org.tgbackup.app.data.MediaType
 import org.tgbackup.app.engine.contentLabel
 import org.tgbackup.app.engine.copiesNothing
@@ -262,9 +264,13 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
     var skipArabic by remember { mutableStateOf(initial.skipArabic) }
     var limit by remember { mutableStateOf(initial.perMinuteLimit.toString()) }
     var viaTakeout by remember { mutableStateOf(initial.viaTakeout) }
+    var perTurn by remember { mutableStateOf(initial.messagesPerTurn.toString()) }
     val all = MediaType.ALL in chosen
+    // A bot only helps send: a job needs a regular account too, and "בלי הורדה" takes regular accounts only.
+    val botProblem = botRule(accounts.filter { it.id in selected }, viaTakeout)
+    val hasBot = accounts.any { it.id in selected && it.isBot }
     val copiesNothing = copiesNothing(chosen.toList(), if (all) "" else extensions)
-    val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty() && !copiesNothing
+    val valid = source.isNotBlank() && target.isNotBlank() && selected.isNotEmpty() && !copiesNothing && botProblem == null
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -314,16 +320,20 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                     ) {
                         Checkbox(checked = acc.id in selected, onCheckedChange = null, enabled = !taken)
                         Text(
-                            acc.name.ifBlank { acc.phone } + if (taken) " (משויך למשימה אחרת)" else "",
+                            (if (acc.isBot) "🤖 " else "") + acc.name.ifBlank { acc.phone.ifBlank { "בוט" } } + if (taken) " (משויך למשימה אחרת)" else "",
                             color = if (taken) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f) else MaterialTheme.colorScheme.onSurface,
                         )
                     }
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = viaTakeout, onCheckedChange = { viaTakeout = it })
+                    Switch(checked = viaTakeout, onCheckedChange = { viaTakeout = it }, enabled = !hasBot || viaTakeout)
                     Text("  📡 העתקה בלי הורדה (דרך סשן הייצוא)")
                 }
+                if (hasBot && !viaTakeout) {
+                    Text("לא זמין עם בוט: טלגרם לא נותן לבוט סשן ייצוא.", style = MaterialTheme.typography.bodySmall)
+                }
+                botProblem?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (viaTakeout) {
                     Text(
                         "עובד גם בערוצים מוגנים וחסומים. " +
@@ -335,6 +345,14 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                 if (selected.size > 1) {
                     Text("מצב עבודה", style = MaterialTheme.typography.labelLarge)
                     JobMode.entries.forEach { m -> RadioRow(m.label, mode == m) { mode = m } }
+                    if (mode == JobMode.ORDERED) {
+                        OutlinedTextField(
+                            perTurn, { perTurn = it.filter(Char::isDigit).take(2) },
+                            label = { Text("הודעות בכל תור (1 עד $MAX_MESSAGES_PER_TURN)") }, singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            supportingText = { Text("כל חשבון שולח כמה הודעות ברצף, ואז התור עובר לבא") },
+                        )
+                    }
                 }
 
                 OutlinedTextField(
@@ -375,6 +393,7 @@ private fun JobDialog(initial: Job, accounts: List<Account>, usedElsewhere: Set<
                         skipArabic = skipArabic,
                         perMinuteLimit = limit.toIntOrNull() ?: 25,
                         viaTakeout = viaTakeout,
+                        messagesPerTurn = (perTurn.toIntOrNull() ?: 3).coerceIn(1, MAX_MESSAGES_PER_TURN),
                     ),
                 )
             }) { Text("שמור") }
