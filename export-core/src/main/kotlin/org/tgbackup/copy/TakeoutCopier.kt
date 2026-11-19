@@ -199,7 +199,15 @@ class TakeoutCopier(
         }
     }
 
-    suspend fun send(source: CopyPeer, target: CopyPeer, msg: MTPDmessage, stripLinks: Boolean): Sent {
+    suspend fun send(source: CopyPeer, target: CopyPeer, msg: MTPDmessage, stripLinks: Boolean): Sent = try {
+        sendOnce(source, target, msg, stripLinks)
+    } catch (e: RpcError) {
+        // The same random_id arrived twice (the session sent the request again after a connection or session change):
+        // Telegram already posted it, so it is delivered, not a failure to re-upload (which would post it again).
+        if (e.type == "RANDOM_ID_DUPLICATE") Sent.Ok(0) else throw e
+    }
+
+    private suspend fun sendOnce(source: CopyPeer, target: CopyPeer, msg: MTPDmessage, stripLinks: Boolean): Sent {
         val media = msg.vmedia
         val keepLink = media is MTPDmessageMediaWebPage
         val strip = stripLinks && !keepLink
@@ -261,6 +269,7 @@ class TakeoutCopier(
                 return Sent.Ok(sentId(r)).also { sendCaptionRest(target, captionRest) }
             } catch (e: RpcError) {
                 when {
+                    e.type == "RANDOM_ID_DUPLICATE" -> throw e
                     !triedPublicRef && e.type == "CHAT_FORWARDS_RESTRICTED" -> {
                         triedPublicRef = true
                         val why = mediaDetails(current)

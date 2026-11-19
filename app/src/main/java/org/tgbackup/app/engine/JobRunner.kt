@@ -210,11 +210,14 @@ class JobRunner(
         val ms = System.currentTimeMillis() - t0
         val line = "[$tag · ${ac.tag}] ערוץ ה$role נמצא ב-${"%.1f".format(ms / 1000.0)} שנ': ${chat.title}"
         if (ms > SLOW_RESOLVE_MS) {
-            log.warn("$line (איטי)")
+            // What the connection to Telegram did meanwhile: a network problem shows as connecting / waiting for network.
+            val connection = ac.connection.since(t0)
+            log.warn("$line (איטי) — החיבור לטלגרם בזמן האיתור: $connection")
             SentryOnce.message("resolve-slow|${job.id}|${ac.account.id}|$role", "Finding a chat took ${ms / 1000} s", SentryLevel.WARNING) { s ->
                 s.setTag("job", tag)
                 s.setTag("role", if (role == "מקור") "source" else "target")
                 s.setExtra("seconds", (ms / 1000).toString())
+                s.setExtra("connection", connection)
             }
         } else {
             log.info(line)

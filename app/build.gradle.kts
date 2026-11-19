@@ -5,10 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-val appVersionName = "2.2.30"
+val appVersionName = "2.2.31"
 // The old Python/buildozer builds used large generated version codes, so this
 // stays above them to let the new APK install as an update over the old one.
-val appVersionCode = 2_000_022_030
+val appVersionCode = 2_000_022_031
 
 android {
     namespace = "org.tgbackup.app"
@@ -65,6 +65,8 @@ android {
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        // As in export-core: D8 in AGP 8.13 knows Kotlin metadata up to 2.2 and warned once per class with 2.4's.
+        freeCompilerArgs.add("-Xmetadata-version=2.2.0")
     }
 }
 

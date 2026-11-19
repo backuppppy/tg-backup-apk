@@ -22,6 +22,7 @@ import dev.g000sha256.tdl.dto.File as TdFile
 import dev.g000sha256.tdl.dto.InputMessageContent
 import dev.g000sha256.tdl.dto.Message
 import dev.g000sha256.tdl.dto.UpdateAuthorizationState
+import dev.g000sha256.tdl.dto.UpdateConnectionState
 import dev.g000sha256.tdl.dto.UpdateChatHasProtectedContent
 import dev.g000sha256.tdl.dto.UpdateMessageSendFailed
 import dev.g000sha256.tdl.dto.UpdateMessageSendSucceeded
@@ -102,12 +103,16 @@ class AccountClient(
 
     val tag: String get() = account.name.ifBlank { account.phone }
 
+    /** TDLib's connection to Telegram over time (for the slow chat-finding report). */
+    val connection = ConnectionLog()
+
     fun start() {
         // Subscribe before the first request so the initial authorization updates aren't missed.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.allUpdates.collect { update ->
                 when (update) {
                     is UpdateAuthorizationState -> onAuthState(update.authorizationState)
+                    is UpdateConnectionState -> connection.record(connectionLabel(update.state))
                     is UpdateChatHasProtectedContent ->
                         _protectionNotices.tryEmit(ProtectionNotice(update.chatId, update.hasProtectedContent))
                     is UpdateMessageSendSucceeded -> completeSend(update.oldMessageId, SendOutcome.Sent(update.message.id))
@@ -449,3 +454,44 @@ class AccountClient(
 }
 
 fun Long.serverId(): Long = this shr 20
+
+/** The Hebrew name of a TDLib connection state. */
+fun connectionLabel(state: dev.g000sha256.tdl.dto.ConnectionState): String = when (state) {
+    is dev.g000sha256.tdl.dto.ConnectionStateReady -> "מחובר"
+    is dev.g000sha256.tdl.dto.ConnectionStateUpdating -> "מעדכן"
+    is dev.g000sha256.tdl.dto.ConnectionStateConnecting -> "מתחבר"
+    is dev.g000sha256.tdl.dto.ConnectionStateConnectingToProxy -> "מתחבר לפרוקסי"
+    is dev.g000sha256.tdl.dto.ConnectionStateWaitingForNetwork -> "ממתין לרשת"
+    else -> state::class.simpleName.orEmpty()
+}
+
+/**
+ * The connection states TDLib reported, with their times (the last [keep]). Answers what the connection did during a
+ * span: on 17-18/11 finding a chat took 157-167 s while the user's network dropped connections to Telegram.
+ */
+class ConnectionLog(private val keep: Int = 50, private val now: () -> Long = System::currentTimeMillis) {
+    private val changes = ArrayDeque<Pair<Long, String>>()
+
+    @Synchronized
+    fun record(label: String) {
+        changes.addLast(now() to label)
+        while (changes.size > keep) changes.removeFirst()
+    }
+
+    /** The state now ("לא ידוע" before TDLib reported any). */
+    @Synchronized
+    fun current(): String = changes.lastOrNull()?.second ?: "לא ידוע"
+
+    /**
+     * The state it was in at [sinceMs] when nothing changed since; else that state and the changes after it in order,
+     * each with its second from [sinceMs] ("לא ידוע" before TDLib reported any).
+     */
+    @Synchronized
+    fun since(sinceMs: Long): String {
+        val after = changes.filter { it.first >= sinceMs }
+        val before = changes.lastOrNull { it.first < sinceMs }?.second
+        if (after.isEmpty()) return before ?: "לא ידוע"
+        val head = before?.let { "$it ← " }.orEmpty()
+        return head + after.joinToString(" ← ") { (t, l) -> "$l (${(t - sinceMs) / 1000} שנ')" }
+    }
+}

@@ -74,21 +74,24 @@ internal class MtpSession(
         val parse: (TlReader) -> Any?,
         val result: CompletableDeferred<Any?>,
         val wrapped: Boolean,
+        /** The request's name, for the diagnostics. */
+        val name: String = "",
         val createdAt: Long = System.currentTimeMillis(),
         @Volatile var resends: Int = 0,
     )
 
     private val badMsgStorms = BadMsgStormDetector()
 
+    /** What each recently sent message was and when it went out (the bad_msg diagnostics: which message was refused). */
+    private val sentLog = SentLog()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pending = ConcurrentHashMap<Long, Pending>()
     private val connectLock = Mutex()
     private val ackQueue = java.util.concurrent.ConcurrentLinkedQueue<Long>()
 
-    private var sessionId = Crypto.random.nextLong()
-    private var seqNo = 0
-    private var lastMsgId = 0L
-    private val stateLock = Any()
+    /** msg_id, seq_no and session_id, always given out together (see [MsgIds]). */
+    private val ids = MsgIds { System.currentTimeMillis() + clock.offsetMs }
 
     @Volatile
     private var connectionInited = false
@@ -114,7 +117,7 @@ internal class MtpSession(
                 InitConnection(app.apiId, app.deviceModel, app.systemVersion, app.appVersion, app.langCode, "", app.langCode, fn),
             )
         } else fn
-        val p = Pending(query.toBytes(), { r -> fn.parseResult(r) }, CompletableDeferred(), wrap)
+        val p = Pending(query.toBytes(), { r -> fn.parseResult(r) }, CompletableDeferred(), wrap, fn::class.simpleName.orEmpty())
         ensureConnected()
         send(p)
         @Suppress("UNCHECKED_CAST")
@@ -151,27 +154,13 @@ internal class MtpSession(
         }
     }
 
-    private fun nextMsgId(): Long = synchronized(stateLock) {
-        val now = System.currentTimeMillis() + clock.offsetMs
-        var id = ((now / 1000) shl 32) or (((now % 1000) * 4294967L) and 0xfffffffcL)
-        if (id <= lastMsgId) id = lastMsgId + 4
-        lastMsgId = id
-        id
-    }
-
-    private fun nextSeq(content: Boolean): Int = synchronized(stateLock) {
-        if (content) {
-            val s = seqNo * 2 + 1
-            seqNo++
-            s
-        } else seqNo * 2
-    }
-
     private suspend fun send(p: Pending) {
-        val msgId = nextMsgId()
+        val id = ids.next(content = true)
+        val msgId = id.msgId
         pending[msgId] = p
+        sentLog.sent(msgId, "request ${p.name}" + if (p.resends > 0) " (resend ${p.resends})" else "")
         try {
-            sendRaw(msgId, nextSeq(true), p.body)
+            sendRaw(id, p.body)
         } catch (e: java.io.IOException) {
             // Reconnect and resend everything that is pending.
             val t = tcp
@@ -180,18 +169,18 @@ internal class MtpSession(
         }
     }
 
-    private suspend fun sendRaw(msgId: Long, seq: Int, body: ByteArray) {
+    private suspend fun sendRaw(id: MsgIds.Ids, body: ByteArray) {
         val t = tcp ?: throw java.io.IOException("not connected")
-        val packet = encrypt(msgId, seq, body)
+        val packet = encrypt(id, body)
         withContext(Dispatchers.IO) { t.send(packet) }
     }
 
-    private fun encrypt(msgId: Long, seq: Int, body: ByteArray): ByteArray {
+    private fun encrypt(id: MsgIds.Ids, body: ByteArray): ByteArray {
         val w = TlWriter()
         w.long(serverSalt)
-        w.long(sessionId)
-        w.long(msgId)
-        w.int(seq)
+        w.long(id.sessionId)
+        w.long(id.msgId)
+        w.int(id.seq)
         w.int(body.size)
         w.raw(body)
         val unpadded = w.size
@@ -296,7 +285,9 @@ internal class MtpSession(
         val pr = TlReader(plain)
         pr.long() // salt
         val sid = pr.long()
-        if (sid != sessionId) {
+        // Answers to requests sent before a new session (bad_msg 32/33) still come in the old one: they are taken, so
+        // those requests are neither stuck nor sent twice (19/11: 255 answers were dropped in a 34-minute run).
+        if (!ids.isOurs(sid)) {
             log("DC${dc.id}: message for another session ignored")
             return
         }
@@ -340,7 +331,9 @@ internal class MtpSession(
                 r.int()
                 val code = r.int()
                 val verdict = badMsgStorms.record(code)
-                if (verdict is BadMsgStormDetector.Verdict.Log) log("DC${dc.id}: bad_msg_notification $code")
+                // Which of our messages was refused: its kind, how long ago it went out, and its id's own age.
+                val what = sentLog.describe(badId, pending.containsKey(badId), System.currentTimeMillis() + clock.offsetMs)
+                if (verdict is BadMsgStormDetector.Verdict.Log) log("DC${dc.id}: bad_msg_notification $code: $what")
                 val offsetBefore = clock.offsetMs
                 when (code) {
                     16, 17 -> {
@@ -348,12 +341,12 @@ internal class MtpSession(
                         resend(badId)
                     }
                     32, 33 -> {
-                        synchronized(stateLock) {
-                            sessionId = Crypto.random.nextLong()
-                            seqNo = 0
-                        }
+                        // Only the refused message is sent again, in a new session. The other pending requests were
+                        // accepted in the old one and are answered there (see isOurs): sending them all again executed
+                        // them twice, and a request sent in the middle of the switch could wait for ever.
+                        ids.newSession()
                         connectionInited = false
-                        resendAll()
+                        resend(badId)
                     }
                     else -> pending.remove(badId)?.result?.completeExceptionally(MtpException("bad_msg_notification $code"))
                 }
@@ -387,6 +380,8 @@ internal class MtpSession(
                     pendingCount = all.size,
                     oldestRequestAgeMs = all.minOfOrNull { it.createdAt }?.let { now - it } ?: 0L,
                     maxResends = all.maxOfOrNull { it.resends } ?: 0,
+                    refused = sentLog.recentRefused(),
+                    pendingNames = all.joinToString(",") { it.name },
                 ),
             )
         }
@@ -419,7 +414,11 @@ internal class MtpSession(
         val ids = ArrayList<Long>()
         while (true) ids.add(ackQueue.poll() ?: break)
         if (ids.isEmpty()) return
-        runCatching { sendRaw(nextMsgId(), nextSeq(false), MTPDmsgs_ack(ids).toBytes()) }
+        runCatching {
+            val id = this.ids.next(content = false)
+            sentLog.sent(id.msgId, "ack x${ids.size}")
+            sendRaw(id, MTPDmsgs_ack(ids).toBytes())
+        }
     }
 
     private suspend fun pingLoop() {
@@ -433,7 +432,9 @@ internal class MtpSession(
                 continue
             }
             runCatching {
-                sendRaw(nextMsgId(), nextSeq(true), MTPPing_delay_disconnect(Crypto.random.nextLong(), 75).toBytes())
+                val id = ids.next(content = true)
+                sentLog.sent(id.msgId, "ping")
+                sendRaw(id, MTPPing_delay_disconnect(Crypto.random.nextLong(), 75).toBytes())
             }.onFailure { dropConnection(t) }
         }
     }
@@ -449,4 +450,85 @@ internal class MtpSession(
 internal class MtpClock {
     @Volatile
     var offsetMs: Long = 0
+}
+
+/**
+ * The bad_msg diagnostics: what each recently sent message was ([sent], the last [keep]) and the description of the
+ * last refused ones. On 2-18/11 Sentry saw storms of 20 code 16 refusals while one request waited 4-10 minutes.
+ */
+internal class SentLog(private val keep: Int = 500, private val now: () -> Long = System::currentTimeMillis) {
+    private val sent = LinkedHashMap<Long, Pair<String, Long>>()
+    private val refused = ArrayDeque<String>()
+
+    @Synchronized
+    fun sent(msgId: Long, kind: String) {
+        sent[msgId] = kind to now()
+        while (sent.size > keep) sent.remove(sent.keys.first())
+    }
+
+    /**
+     * "request X (pending), sent 312 s ago, id 315 s old" for refused [msgId]; [serverNowMs] is now on the server's clock
+     * (local time + the session's offset), against which the id's own time is measured.
+     */
+    @Synchronized
+    fun describe(msgId: Long, isPending: Boolean, serverNowMs: Long): String {
+        val idAge = (serverNowMs - (msgId ushr 32) * 1000) / 1000
+        val entry = sent[msgId]
+        val d = if (entry == null) "unknown message (not sent by this session lately), id ${idAge} s old"
+        else "${entry.first}${if (isPending) " (pending)" else ""}, sent ${(now() - entry.second) / 1000} s ago, id ${idAge} s old"
+        refused.addLast(d)
+        while (refused.size > 20) refused.removeFirst()
+        return d
+    }
+
+    @Synchronized
+    fun recentRefused(): String = refused.joinToString(" | ")
+}
+
+/**
+ * Gives out each outgoing message's msg_id and seq_no together, under one lock, with the session_id they belong to.
+ * On 19/11 a live takeout job got a bad_msg_notification 33 (msg_seqno too high) every few seconds: msg_id and seq_no
+ * were taken in two steps, so a message sent meanwhile (an ack, a ping, another request) could get a higher msg_id
+ * but a lower seq_no. Each 33 started a new session and dropped the server's answers to the old one.
+ */
+internal class MsgIds(private val now: () -> Long) {
+    class Ids(val msgId: Long, val seq: Int, val sessionId: Long)
+
+    private var lastMsgId = 0L
+    private var seqNo = 0
+
+    @Volatile
+    var sessionId: Long = Crypto.random.nextLong()
+        private set
+
+    /** The sessions before the current one (the last few), whose answers are still taken. */
+    private val previous = ArrayDeque<Long>()
+
+    /** The next ids; [content] messages (requests, pings) count in seq_no, acks do not. */
+    @Synchronized
+    fun next(content: Boolean): Ids {
+        val t = now()
+        var id = ((t / 1000) shl 32) or (((t % 1000) * 4294967L) and 0xfffffffcL)
+        if (id <= lastMsgId) id = lastMsgId + 4
+        lastMsgId = id
+        val seq = if (content) seqNo++ * 2 + 1 else seqNo * 2
+        return Ids(id, seq, sessionId)
+    }
+
+    /** A new session (after bad_msg_notification 32/33): seq_no starts over, msg_id keeps growing. */
+    @Synchronized
+    fun newSession() {
+        previous.addLast(sessionId)
+        while (previous.size > KEEP_PREVIOUS) previous.removeFirst()
+        sessionId = Crypto.random.nextLong()
+        seqNo = 0
+    }
+
+    /** True for this session and the last few before it. */
+    @Synchronized
+    fun isOurs(sid: Long): Boolean = sid == sessionId || sid in previous
+
+    private companion object {
+        const val KEEP_PREVIOUS = 4
+    }
 }

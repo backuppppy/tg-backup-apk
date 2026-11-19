@@ -62,4 +62,8 @@ data class BadMsgStorm(
     val pendingCount: Int,
     val oldestRequestAgeMs: Long,
     val maxResends: Int,
+    /** The last refused messages, described (kind, when sent, id age). */
+    val refused: String = "",
+    /** The names of the requests waiting for an answer. */
+    val pendingNames: String = "",
 )
