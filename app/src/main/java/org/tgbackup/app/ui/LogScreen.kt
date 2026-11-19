@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -21,6 +22,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,12 +44,24 @@ import org.tgbackup.app.engine.Level
 @Composable
 fun LogScreen() {
     val entries by App.instance.log.entries.collectAsState()
+    // The list keeps its place by key, so a line added above the first one was drawn above the screen even at the
+    // top: while the user is at the top, the list follows the newest line; scrolled down, it stays where it is.
+    val listState = rememberLazyListState()
+    var followNewest by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) followNewest = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 40
+        }
+    }
+    LaunchedEffect(entries.lastOrNull()?.seq) {
+        if (followNewest && entries.isNotEmpty()) listState.scrollToItem(0)
+    }
     Column(Modifier.fillMaxSize().padding(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { App.instance.log.clear() }) { Text("נקה") }
             Text("${entries.size} שורות", modifier = Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodySmall)
         }
-        LazyColumn(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState) {
             items(entries.asReversed(), key = { it.seq }) { e ->
                 val color = when (e.level) {
                     Level.SUCCESS -> Color(0xFF7FD1AE)
