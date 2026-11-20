@@ -112,9 +112,12 @@ class SenderRotation(
  * Why a job's senders cannot run, or null: a bot only helps send (it cannot read a chat's history), so a job needs a
  * regular account too; and a bot cannot open an export session, so "בלי הורדה" takes regular accounts only.
  */
+/** Shown wherever a job has bots only: the editor, the start refusal, and the stopped job's card. */
+const val MSG_BOT_NEEDS_REGULAR = "חובה לצרף גם חשבון רגיל למשימה — בוט לבד לא יכול לקרוא את המקור"
+
 fun botRule(accounts: List<org.tgbackup.app.data.Account>, viaTakeout: Boolean): String? = when {
     accounts.isNotEmpty() && accounts.all { it.isBot } ->
-        "משימה עם בוט צריכה גם חשבון רגיל אחד לפחות — הוא זה שקורא את המקור"
+        "$MSG_BOT_NEEDS_REGULAR"
     viaTakeout && accounts.any { it.isBot } ->
         "העתקה בלי הורדה לא עובדת עם בוטים (טלגרם לא נותן לבוט סשן ייצוא) — הסר את הבוט או כבה את \"בלי הורדה\""
     else -> null

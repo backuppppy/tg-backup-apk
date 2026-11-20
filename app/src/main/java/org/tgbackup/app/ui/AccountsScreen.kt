@@ -145,7 +145,11 @@ private fun AccountCard(acc: Account, client: AccountClient?, onEdit: () -> Unit
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(acc.name.ifBlank { "ללא שם" }, style = MaterialTheme.typography.titleMedium)
-            Text(if (acc.isBot) "🤖 בוט — עוזר לשלוח במשימות" else acc.phone, style = MaterialTheme.typography.bodySmall)
+            if (acc.isBot) {
+                Text("⚠️ חובה לצרף גם חשבון רגיל למשימה", color = BOT_NOTE_COLOR, style = MaterialTheme.typography.bodySmall)
+            } else {
+                Text(acc.phone, style = MaterialTheme.typography.bodySmall)
+            }
 
             // ── Regular (TDLib) session ──────────────────────────────────────
             val regularColor = when (auth) {
@@ -282,6 +286,9 @@ private fun AccountDialog(initial: Account, onDismiss: () -> Unit, onSave: (Acco
     )
 }
 
+/** The warning colour of the "a bot needs a regular account" note (the log's warning yellow). */
+private val BOT_NOTE_COLOR = androidx.compose.ui.graphics.Color(0xFFFFCB6B)
+
 /** Marks a new bot in the dialog before its token is typed (never saved: the dialog requires a real token). */
 private const val BOT_DRAFT = "-"
 
@@ -303,8 +310,14 @@ private fun BotDialog(initial: Account, apiFrom: Account?, onDismiss: () -> Unit
         title = { Text(if (isNew) "🤖 בוט חדש" else "עריכת בוט") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Someone who adds a bot may think a bot alone is enough: the rule comes first.
                 Text(
-                    "הבוט רק עוזר לשלוח. צריך להוסיף אותו כמנהל בערוץ היעד, וכחבר או מנהל בערוץ המקור. " +
+                    "⚠️ בוט לא יכול לעבוד לבד: בכל משימה עם בוט חובה לצרף גם חשבון רגיל. " +
+                        "החשבון הרגיל קורא את המקור, והבוט עוזר לו לשלוח.",
+                    color = BOT_NOTE_COLOR, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                )
+                Text(
+                    "צריך להוסיף אותו כמנהל בערוץ היעד, וכחבר או מנהל בערוץ המקור. " +
                         "הוא לא עובד עם \"בלי הורדה\", ושולח עד 20 הודעות בדקה.",
                     style = MaterialTheme.typography.bodySmall,
                 )

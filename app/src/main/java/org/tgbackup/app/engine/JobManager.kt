@@ -158,10 +158,14 @@ class JobManager(
         }
         // A job forgotten while it stopped keeps no status.
         if (jobId in _statuses.value) {
-            setStatus(jobId) { it.copy(running = false, paused = false, phase = "עצור", runningSince = 0) }
+            val phase = stopReasons.remove(jobId) ?: "עצור"
+            setStatus(jobId) { it.copy(running = false, paused = false, phase = phase, runningSince = 0) }
             runCatching { showSavedProgress(jobId) }.onFailure { e -> log.error("[$jobId] ${e.message}") }
         }
     }
+
+    /** Why a run stopped by itself (shown on the card instead of "עצור"). */
+    private val stopReasons = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private fun setStatus(id: String, transform: (JobStatus) -> JobStatus) =
         _statuses.update { it + (id to transform(it[id] ?: JobStatus())) }
@@ -176,6 +180,8 @@ class JobManager(
         val job = cfg.jobs.firstOrNull { it.id == jobId } ?: return "המשימה לא נמצאה"
         if (job.source.isBlank() || job.target.isBlank()) return "חסר מקור או יעד"
         if (job.accountIds.isEmpty()) return "לא נבחרו חשבונות למשימה"
+        // A job left with bots only (its regular account deleted) is refused, not started to fail every 15 s.
+        botRule(cfg.accounts.filter { it.id in job.accountIds }, job.viaTakeout)?.let { return it }
         val busy = cfg.jobs.filter { it.id != jobId && isRunning(it.id) }
             .flatMap { other -> other.accountIds.intersect(job.accountIds.toSet()) }
         if (busy.isNotEmpty()) {
@@ -243,7 +249,14 @@ class JobManager(
                     // Regular accounts first: the first one reads the source, and a bot cannot (see botRule).
                     val clients = current.accountIds.mapNotNull { accounts[it] }.sortedBy { it.account.isBot }
                     if (clients.isEmpty()) error("אף אחד מהחשבונות של המשימה לא מוגדר עם API ID")
-                    botRule(clients.map { it.account }, current.viaTakeout)?.let { error(it) }
+                    // A rule a restart cannot fix (bots only, or a bot with בלי הורדה) stops the job with its reason.
+                    val rule = botRule(clients.map { it.account }, current.viaTakeout)
+                    if (rule != null) {
+                        log.error("[$label] נעצרה: $rule")
+                        stopReasons[jobId] = "⛔ נעצרה: $rule"
+                        store.updateConfig { it.copy(autoResume = it.autoResume - jobId) }
+                        break
+                    }
                     log.info("[$label] מתחיל…")
                     val clearStartFrom = {
                         store.updateConfig { c ->
