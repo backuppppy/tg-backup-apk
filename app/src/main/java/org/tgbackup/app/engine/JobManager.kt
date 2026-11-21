@@ -69,6 +69,8 @@ class JobManager(
     private val runTick: Long = 10_000,
     /** How often a running job reads its source's latest id again (refreshLatest). */
     private val latestTick: Long = 3_600_000,
+    /** At a run's start, how long to wait before reading the latest id again when the read failed. */
+    private val latestRetry: Long = 20_000,
     /** The wall clock of the run time; a test moves it by hand. */
     private val wallClock: () -> Long = System::currentTimeMillis,
     /** The most of one clock segment that counts as run time: anything longer is the PC asleep. */
@@ -88,7 +90,7 @@ class JobManager(
     private val live = ConcurrentHashMap<CoJob, String>()
 
     /** What a running job does every [latestTick]; a test replaces it. */
-    internal var periodicRefresh: suspend (String) -> Unit = { refreshLatest(it) }
+    internal var periodicRefresh: suspend (String) -> Long? = { refreshLatest(it) }
     private val pauseFlags = ConcurrentHashMap<String, MutableStateFlow<Boolean>>()
 
     /** A run's clock: since when its time is not in Progress.runMillis yet. */
@@ -225,16 +227,24 @@ class JobManager(
         }
         // The newest id of the source while the job runs (a caught-up ordered loop reads it as well).
         val latestClock = scope.launch {
+            suspend fun read(): Boolean = try {
+                periodicRefresh(jobId) != null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                log.warn("[$jobId] קריאת ID אחרון נכשלה: ${e.message}")
+                false
+            }
+            // Every run reads it at its start: a saved one may be stale (below the position it only follows the
+            // position). The accounts may still be connecting, so a failed read is tried again a few times.
+            for (attempt in 1..START_LATEST_TRIES) {
+                if (running[jobId] !== self || read()) break
+                if (attempt < START_LATEST_TRIES) delay(latestRetry)
+            }
             while (isActive) {
                 delay(latestTick)
                 if (running[jobId] !== self) break
-                try {
-                    periodicRefresh(jobId)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    log.warn("[$jobId] קריאת ID אחרון נכשלה: ${e.message}")
-                }
+                read()
             }
         }
         try {
@@ -463,3 +473,6 @@ class JobManager(
 
 /** The most of one clock segment that counts as run time, in run ticks: anything longer is the PC asleep. */
 private const val MAX_TICKS_PER_SEGMENT = 2
+
+/** How many times a run tries to read its source's latest id at its start (every latestRetry). */
+private const val START_LATEST_TRIES = 6
